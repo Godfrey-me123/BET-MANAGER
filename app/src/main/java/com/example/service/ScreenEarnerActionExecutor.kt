@@ -1,4 +1,5 @@
 package com.example.service
+import java.util.Locale
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
@@ -57,14 +58,26 @@ class ScreenEarnerActionExecutor(
         var clickable: AccessibilityNodeInfo? = null
         return try {
             clickable = clickableAncestor(node)
-            val target = clickable ?: node
+            val target = clickable ?: if (node.isClickable) node else null
+            if (target == null) {
+                return Result(false, "Element found for '$query' but neither element nor ancestors are clickable")
+            }
             val clicked = target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            if (clicked) Result(true, "Android accepted click on '$query'")
-            else {
-                val bounds = android.graphics.Rect()
-                node.getBoundsInScreen(bounds)
-                if (bounds.isEmpty) Result(false, "Element has no usable screen bounds: $query")
-                else tap(bounds.exactCenterX(), bounds.exactCenterY())
+            if (clicked) {
+                Result(true, "Android accepted click on '$query'")
+            } else {
+                val lowerQuery = query.lowercase(Locale.US)
+                val isSensitive = lowerQuery.contains("bet") || lowerQuery.contains("cash") ||
+                    lowerQuery.contains("pay") || lowerQuery.contains("deposit") ||
+                    lowerQuery.contains("withdraw") || lowerQuery.contains("stake")
+                if (isSensitive) {
+                    Result(false, "ACTION_CLICK failed and coordinate tap rejected for sensitive control '$query'")
+                } else {
+                    val bounds = android.graphics.Rect()
+                    target.getBoundsInScreen(bounds)
+                    if (bounds.isEmpty) Result(false, "Element has no usable screen bounds: $query")
+                    else tap(bounds.exactCenterX(), bounds.exactCenterY())
+                }
             }
         } finally {
             clickable?.let { runCatching { it.recycle() } }

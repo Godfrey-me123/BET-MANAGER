@@ -1,5 +1,4 @@
 package com.example.data.engine
-
 import com.example.data.database.ScreenEarnerRepository
 import com.example.data.model.FloatingShortcut
 import com.example.data.model.MultiplierRecord
@@ -284,7 +283,7 @@ class AutomationEngine(
     private val _queuedOpportunityCount = MutableStateFlow(0)
     val queuedOpportunityCount: StateFlow<Int> = _queuedOpportunityCount.asStateFlow()
 
-    var currentDailyLossProvider: ((nowMs: Long) -> Double)? = null
+    var currentDailyLossProvider: ((nowMs: Long) -> Double?)? = null
     var onDailyNetOutcomeRecorded: ((netProfit: Double, nowMs: Long) -> Double)? = null
 
     @Volatile
@@ -789,12 +788,22 @@ class AutomationEngine(
     fun enforceLimitsNow(limits: RiskLimits, currentTimeMs: Long = System.currentTimeMillis()): Boolean {
         latestLimitsCache = limits
         if (_automationState.value != AutomationState.RUNNING) return false
-        val dailyLoss = currentDailyLossProvider?.invoke(currentTimeMs) ?: 0.0
+        val dailyLoss = currentDailyLossProvider?.invoke(currentTimeMs)
+        if (limits.stopOnLossEnabled && limits.maxDailyLoss > 0.0) {
+            if (dailyLoss == null) {
+                haltAutomationForLimit("Daily loss protection engaged: daily loss data is unavailable (fail-closed).")
+                return true
+            }
+            if (dailyLoss >= limits.maxDailyLoss) {
+                haltAutomationForLimit("Daily loss limit reached (-${CurrencyManager.formatAmount(dailyLoss)} >= ${CurrencyManager.formatAmount(limits.maxDailyLoss)}).")
+                return true
+            }
+        }
         val check = riskManager.evaluateSessionLimits(
             currentSessionProfit = activeSessionProfit,
             currentSessionLoss = activeSessionLoss,
             limits = limits,
-            currentDailyLoss = dailyLoss
+            currentDailyLoss = dailyLoss ?: 0.0
         )
         if (!check.isAllowed) {
             haltAutomationForLimit(check.violationReason ?: "Session limit reached.")
@@ -975,7 +984,7 @@ class AutomationEngine(
             sawCashOutAvailableInCurrentFlight = false
             inFlightWaitingNoticeEmitted = false
             lastLifecycleNoticeStage = null
-            isActionInProgress.set(false)
+            // A strategy-session timeout must not unlock an asynchronous UI action.
             gameDetection.setBetPlaced(false)
         }
         val stratState = strategyEngine.getState()
@@ -1086,12 +1095,8 @@ class AutomationEngine(
                 return
             }
 
-            if (isActionInProgress.get() && (System.currentTimeMillis() - actionStartedAtMs.get()) > 7_000L) {
-                isActionInProgress.set(false)
-            }
-            if (!isActionInProgress.compareAndSet(false, true)) {
-                return
-            }
+            if (isActionInProgress.get()) return
+            if (!isActionInProgress.compareAndSet(false, true)) return
             actionStartedAtMs.set(System.currentTimeMillis())
 
             val stakeInstruction = strategyEngine.getPendingStakeInstruction()
@@ -1182,8 +1187,9 @@ class AutomationEngine(
             onFinished?.invoke(false, "Bet already active in current round.")
             return
         }
-        if (isActionInProgress.get() && (System.currentTimeMillis() - actionStartedAtMs.get()) > 7_000L) {
-            isActionInProgress.set(false)
+        if (isActionInProgress.get()) {
+            onFinished?.invoke(false, "Another bet action is already in progress.")
+            return
         }
         if (!isActionInProgress.compareAndSet(false, true)) {
             onFinished?.invoke(false, "Another bet action is already in progress.")
@@ -1431,7 +1437,11 @@ class AutomationEngine(
             }
 
             val effectiveBalance = resolveEffectiveBalance()
-            val dailyLoss = currentDailyLossProvider?.invoke(currentTimeMs) ?: 0.0
+            val dailyLoss = currentDailyLossProvider?.invoke(currentTimeMs)
+            if (limits.stopOnLossEnabled && limits.maxDailyLoss > 0.0 && dailyLoss == null) {
+                finishFailed("Daily loss limit active but daily loss data is unavailable (fail-closed).", operation = "VALIDATE_LIMITS", episodeTag = "daily_loss_null")
+                return
+            }
             val stratStateBefore = strategyEngine.getState()
             val riskCheck = riskManager.validateBetExecution(
                 proposedStake = proposedStake,
@@ -1443,7 +1453,7 @@ class AutomationEngine(
                 currentSessionProfit = activeSessionProfit,
                 balanceStatus = if (testBalanceOverride != null) BalanceDetectionStatus.VERIFIED else balState.status,
                 balanceFailureReason = balState.failureReason,
-                currentDailyLoss = dailyLoss,
+                currentDailyLoss = dailyLoss ?: 0.0,
                 currentSequenceExposure = activeSequenceExposure + proposedStake
             )
             if (!riskCheck.isAllowed) {
@@ -1483,21 +1493,17 @@ class AutomationEngine(
                     finishFailed("Conflict reading stake back: ${step3Targets.conflictReasons.first()}", operation = "APPLY_STAKE", episodeTag = "stake_conflict")
                     return@applyStake
                 }
-                if (config.verifyStakeReadBack && step3Targets?.detectedStakeText != null) {
-                    if (!AccessibilityController.verifyStakeAccepted(step3Targets.detectedStakeText, proposedStake)) {
-                        finishFailed(
-                            "Stake verification mismatch: expected ${CurrencyManager.formatAmount(proposedStake)}, game displays '${step3Targets.detectedStakeText}'.",
-                            operation = "APPLY_STAKE",
-                            episodeTag = "stake_mismatch"
-                        )
+                if (config.verifyStakeReadBack) {
+                    val stakeText = step3Targets?.detectedStakeText
+                    if (stakeText.isNullOrBlank() || !AccessibilityController.verifyStakeAccepted(stakeText, proposedStake)) {
+                        val reason = if (stakeText.isNullOrBlank()) {
+                            "Mandatory stake verification failed: game stake reading is missing or unreadable."
+                        } else {
+                            "Stake verification mismatch: expected ${CurrencyManager.formatAmount(proposedStake)}, game displays '$stakeText'."
+                        }
+                        finishFailed(reason, operation = "APPLY_STAKE", episodeTag = "stake_mismatch")
                         return@applyStake
                     }
-                } else if (config.verifyStakeReadBack &&
-                    targetUiInteractor is AccessibilityTargetUiInteractor &&
-                    step3Targets?.stakeInputBounds != null
-                ) {
-                    finishFailed("Could not verify stake value in game input.", operation = "APPLY_STAKE", episodeTag = "stake_unverified")
-                    return@applyStake
                 }
 
                 fun proceedSteps5To7() {
@@ -1567,15 +1573,17 @@ class AutomationEngine(
                         return
                     }
                     // Final Stake Re-Verification immediately before BET click
-                    if (config.verifyStakeReadBack &&
-                        step6Targets?.detectedStakeText != null &&
-                        !AccessibilityController.verifyStakeAccepted(step6Targets.detectedStakeText, proposedStake)
-                    ) {
-                        finishFailed(
-                            "Pre-BET stake re-check mismatch: expected ${CurrencyManager.formatAmount(proposedStake)}, displays '${step6Targets.detectedStakeText}'.",
-                            episodeTag = "prebet_stake_mismatch"
-                        )
-                        return
+                    if (config.verifyStakeReadBack) {
+                        val finalStakeText = step6Targets?.detectedStakeText
+                        if (finalStakeText.isNullOrBlank() || !AccessibilityController.verifyStakeAccepted(finalStakeText, proposedStake)) {
+                            val reason = if (finalStakeText.isNullOrBlank()) {
+                                "Pre-BET stake re-check failed: game stake reading is missing or unreadable."
+                            } else {
+                                "Pre-BET stake re-check mismatch: expected ${CurrencyManager.formatAmount(proposedStake)}, displays '$finalStakeText'."
+                            }
+                            finishFailed(reason, operation = "PLACE_BET", episodeTag = "prebet_stake_mismatch")
+                            return
+                        }
                     }
                     // Final Auto Cash Out Re-Verification if enabled
                     if (config.gameAutoCashOutEnabled && step6Targets != null) {
@@ -1678,14 +1686,12 @@ class AutomationEngine(
                             onFinished?.invoke(true, "Bet confirmed: ${CurrencyManager.formatAmount(proposedStake)}")
                         }
 
-                        // Independently check post-click acceptance before marking successful
+                        // Independently check fresh post-click acceptance before marking successful
                         val postClickScan = targetUiInteractor.refreshLiveTargets(null)
-                        val liveButtonAtClick = postClickScan?.siteButtonState ?: gameDetection.gameState.value.siteButtonState
                         val acceptedImmediately = (postClickScan?.isCancelBtnDetected == true) ||
-                            liveButtonAtClick == SiteButtonState.BET_QUEUED ||
-                            liveButtonAtClick == SiteButtonState.CASH_OUT_AVAILABLE
-
-                        if (acceptedImmediately || (targetUiInteractor !is AccessibilityTargetUiInteractor && postClickScan == null)) {
+                            postClickScan?.siteButtonState == SiteButtonState.BET_QUEUED ||
+                            postClickScan?.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE
+                        if (acceptedImmediately) {
                             confirmBetSuccess()
                         } else {
                             val confirmJob = scope.launch {
@@ -1696,33 +1702,23 @@ class AutomationEngine(
                                         delay(100L)
                                         elapsed += 100L
                                         val rescan = targetUiInteractor.refreshLiveTargets(null)
-                                        val btnState = rescan?.siteButtonState ?: gameDetection.gameState.value.siteButtonState
                                         if (rescan?.isCancelBtnDetected == true ||
-                                            btnState == SiteButtonState.BET_QUEUED ||
-                                            btnState == SiteButtonState.CASH_OUT_AVAILABLE
+                                            rescan?.siteButtonState == SiteButtonState.BET_QUEUED ||
+                                            rescan?.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE
                                         ) {
                                             confirmed = true
                                             break
                                         }
                                     }
-                                    if (confirmed) {
-                                        confirmBetSuccess()
-                                    } else {
-                                        finishFailed(
-                                            "Bet acceptance not confirmed by game (button stayed $liveButtonAtClick).",
-                                            targetCoords = verifiedCoords,
-                                            gestureDispatched = true,
-                                            operation = "PLACE_BET",
-                                            episodeTag = "bet_unconfirmed"
-                                        )
-                                    }
-                                } catch (t: Throwable) {
-                                    finishFailed(
-                                        "Bet verification interrupted: ${t.message}",
+                                    if (confirmed) confirmBetSuccess() else finishFailed(
+                                        "Bet acceptance not confirmed by game: no fresh positive state transition detected.",
                                         targetCoords = verifiedCoords,
                                         gestureDispatched = true,
-                                        episodeTag = "bet_verify_err"
+                                        operation = "PLACE_BET",
+                                        episodeTag = "bet_unconfirmed"
                                     )
+                                } catch (t: Throwable) {
+                                    finishFailed("Bet verification interrupted: ${t.message}", targetCoords = verifiedCoords, gestureDispatched = true, episodeTag = "bet_verify_err")
                                 }
                             }
                             confirmJob.invokeOnCompletion {
@@ -1971,8 +1967,8 @@ class AutomationEngine(
         platformName: String,
         currentTimeMs: Long
     ) {
-        val isWin = cashedOutInFlight || crashedMultiplier >= config.targetMultiplier
-        val payout = if (isWin) stakeUsed * config.targetMultiplier else 0.0
+        val isWin = cashedOutInFlight
+        val payout = if (isWin) stakeUsed * (activeTargetMultiplierOverride ?: config.targetMultiplier) else 0.0
         val netProfit = payout - stakeUsed
 
         if (isWin) {
@@ -2044,15 +2040,12 @@ class AutomationEngine(
         if (config.minFlightTimeBeforeCashOutMs > 0L && flightElapsedMs < config.minFlightTimeBeforeCashOutMs) {
             return
         }
-        val cashOutAllowed = siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE ||
-            siteButtonState == SiteButtonState.UNKNOWN
+        val cashOutAllowed = siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE
         // Strictly obey independent isAutoCashOutEnabled flag (never couple to isAutoBetEnabled)
         val autoCashOutActive = config.automationMasterEnabled &&
             config.isAutoCashOutEnabled &&
             config.targetMultiplier >= 1.01
-        val hasTrackedOrManualBet = gameDetection.gameState.value.isBetPlaced ||
-            currentRoundBetActive ||
-            (config.isAutoCashOutEnabled && siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE)
+        val hasTrackedOrManualBet = gameDetection.gameState.value.isBetPlaced || currentRoundBetActive
         val effectiveTarget = (activeTargetMultiplierOverride ?: config.targetMultiplier).coerceAtLeast(1.01)
         if (_automationState.value == AutomationState.RUNNING &&
             autoCashOutActive &&

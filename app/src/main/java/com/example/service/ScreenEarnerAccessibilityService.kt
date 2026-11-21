@@ -124,11 +124,10 @@ class ScreenEarnerAccessibilityService : AccessibilityController() {
             }
             val boundedConfidence = confidence.coerceIn(0f, 1f)
 
+            val hasGameControls = targets.isBetBtnDetected || targets.isCancelBtnDetected || targets.isCashOutBtnDetected
             val gameDetected = resolvedAdapter != null ||
-                hasMultiplierSignals ||
-                targets.detectedBalance != null ||
-                packageName.contains("chrome", ignoreCase = true) ||
-                packageName.contains("browser", ignoreCase = true)
+                (hasMultiplierSignals && hasGameControls) ||
+                (targets.detectedBalance != null && hasGameControls)
 
             val missing = buildList {
                 if (!targets.isBetBtnDetected && !targets.isCancelBtnDetected &&
@@ -154,7 +153,7 @@ class ScreenEarnerAccessibilityService : AccessibilityController() {
                 detectedRoundId = targets.detectedCurrentRoundId,
                 originalDetectedTitle = resolvedGameTitle,
                 supportedPlatforms = allSupportedPlatforms,
-                isReady = gameDetected && hasMultiplierSignals && !fusedResult.hasConflict,
+                isReady = gameDetected && hasMultiplierSignals && hasGameControls && !fusedResult.hasConflict && !fusedResult.isOcrUncertain && boundedConfidence >= 0.50f,
                 gamePhase = targets.gamePhase,
                 missingElements = missing,
                 detectedMultiplier = targets.detectedMultiplier,

@@ -150,6 +150,19 @@ data class DetectedUiTargets(
         autoCashOutInputBounds?.takeIf { !it.isEmpty }?.let { ain ->
             if (Rect.intersects(coRect, ain)) return "CASH OUT bounds collide with Auto Cash Out input"
         }
+        stakeInputBounds?.takeIf { !it.isEmpty }?.let { stk ->
+            if (Rect.intersects(coRect, stk)) return "CASH OUT bounds collide with Stake input control"
+        }
+        if (isCancelBtnDetected || siteButtonState == SiteButtonState.BET_QUEUED) {
+            cancelButtonBounds?.takeIf { !it.isEmpty }?.let { cnl ->
+                if (Rect.intersects(coRect, cnl)) return "CASH OUT bounds collide with Cancel control"
+            }
+        }
+        betButtonBounds?.takeIf { !it.isEmpty }?.let { bet ->
+            if (bet != coRect && Rect.intersects(coRect, bet)) {
+                return "CASH OUT bounds collide with distinct BET control"
+            }
+        }
         return null
     }
 }
@@ -253,6 +266,26 @@ open class AccessibilityController : AccessibilityService() {
             "(?:https?://)?[a-z0-9.-]*(?:betpawa|sportybet)[a-z0-9.-]*(?:/[^\\s]*)?|(?:https?://)?[a-z0-9.-]+\\.(?:com|co\\.[a-z]{2}|ng|ke|tz|zm|gh|ug|za|mw|rw|bet)(?:/[^\\s]*)?",
             Pattern.CASE_INSENSITIVE
         )
+
+        /**
+         * Verifies exact bounds containment and geometry match (overlap >= 70%),
+         * while explicitly rejecting oversized parent containers (e.g. screen-wide layouts).
+         */
+        fun isBoundsSafelyContained(nodeBounds: Rect, targetBounds: Rect): Boolean {
+            if (nodeBounds.isEmpty || targetBounds.isEmpty) return false
+            val widthRatio = nodeBounds.width().toFloat() / targetBounds.width().coerceAtLeast(1).toFloat()
+            val heightRatio = nodeBounds.height().toFloat() / targetBounds.height().coerceAtLeast(1).toFloat()
+            if (widthRatio > 2.2f || heightRatio > 2.2f) return false
+            val intersection = Rect()
+            if (!intersection.setIntersect(nodeBounds, targetBounds)) return false
+            val intersectionArea = intersection.width().toLong() * intersection.height().toLong()
+            val minArea = minOf(
+                nodeBounds.width().toLong() * nodeBounds.height().toLong(),
+                targetBounds.width().toLong() * targetBounds.height().toLong()
+            )
+            if (minArea <= 0L) return false
+            return (intersectionArea.toDouble() / minArea.toDouble()) >= 0.70
+        }
 
         fun setNodeHierarchyLoggingEnabled(enabled: Boolean) {
             _nodeHierarchyLoggingEnabled.value = enabled
@@ -1975,8 +2008,10 @@ open class AccessibilityController : AccessibilityService() {
                     )
                     if (betNode != null && runCatching { betNode.isClickable && betNode.isEnabled }.getOrDefault(false)) {
                         val nodeRect = Rect().also { runCatching { betNode.getBoundsInScreen(it) } }
-                        if (!nodeRect.isEmpty && (betBounds == null || Rect.intersects(nodeRect, betBounds))) {
+                        if (!nodeRect.isEmpty && betBounds != null && isBoundsSafelyContained(nodeRect, betBounds)) {
                             betClickedViaNode = runCatching { betNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
+                        } else if (!nodeRect.isEmpty) {
+                            safeLogW(TAG, "clickBetTarget: matching node bounds rejected due to containment mismatch: nodeRect=$nodeRect target=$betBounds")
                         }
                     }
                 }
@@ -2050,10 +2085,15 @@ open class AccessibilityController : AccessibilityService() {
                     val cashNode = findInteractiveButtonNode(
                         node = root,
                         keywords = listOf("cash out", "cashout", "claim", "collect"),
-                        excludedTerms = listOf("auto", "history", "cashback", "all bets", "my bets", "double", "2x", "cancel")
+                        excludedTerms = listOf("auto", "history", "cashback", "all bets", "my bets", "double", "2x", "cancel", "bet", "place bet")
                     )
                     if (cashNode != null && runCatching { cashNode.isClickable && cashNode.isEnabled }.getOrDefault(false)) {
-                        cashOutClickedViaNode = runCatching { cashNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
+                        val nodeRect = Rect().also { runCatching { cashNode.getBoundsInScreen(it) } }
+                        if (!nodeRect.isEmpty && cashOutBounds != null && isBoundsSafelyContained(nodeRect, cashOutBounds)) {
+                            cashOutClickedViaNode = runCatching { cashNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
+                        } else if (!nodeRect.isEmpty) {
+                            safeLogW(TAG, "clickCashOutTarget: matching node bounds rejected due to containment mismatch: nodeRect=$nodeRect target=$cashOutBounds")
+                        }
                     }
                 }
             } finally {

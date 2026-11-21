@@ -98,6 +98,16 @@ object ScreenOcrAnalyzer {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val isBusy = AtomicBoolean(false)
+    private val captureGeneration = AtomicLong(0L)
+
+    fun nextCaptureGeneration(): Long {
+        val next = captureGeneration.incrementAndGet()
+        _latestOcrSnapshot.value = null
+        isBusy.set(false)
+        return next
+    }
+
+    fun currentCaptureGeneration(): Long = captureGeneration.get()
     private val lastScheduledAtMs = AtomicLong(0L)
 
     @Volatile
@@ -147,6 +157,7 @@ object ScreenOcrAnalyzer {
         }
         lastScheduledAtMs.set(now)
 
+        val gen = captureGeneration.get()
         scope.launch {
             val startedElapsed = SystemClock.elapsedRealtime()
             try {
@@ -158,6 +169,11 @@ object ScreenOcrAnalyzer {
                 val image = InputImage.fromBitmap(copy, 0)
                 client.process(image)
                     .addOnSuccessListener { result ->
+                        if (gen != captureGeneration.get()) {
+                            if (!copy.isRecycled) runCatching { copy.recycle() }
+                            isBusy.set(false)
+                            return@addOnSuccessListener
+                        }
                         val elapsed = (SystemClock.elapsedRealtime() - startedElapsed).coerceAtLeast(1L)
                         val snapshot = toFrameSnapshot(
                             visionText = result,
@@ -191,6 +207,7 @@ object ScreenOcrAnalyzer {
     }
 
     fun release() {
+        nextCaptureGeneration()
         runCatching { recognizer?.close() }
         recognizer = null
         _latestOcrSnapshot.value = null

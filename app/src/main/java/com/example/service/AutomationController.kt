@@ -221,7 +221,7 @@ object AutomationController {
 
     private fun attachEngineCallbacks(targetEngine: AutomationEngine) {
         targetEngine.currentDailyLossProvider = { nowMs ->
-            sessionStateManager?.getDailyLoss(nowMs) ?: 0.0
+            sessionStateManager?.getDailyLoss(nowMs)
         }
         targetEngine.onDailyNetOutcomeRecorded = { netProfit, nowMs ->
             sessionStateManager?.recordDailyNetOutcome(netProfit, nowMs) ?: 0.0
@@ -309,13 +309,9 @@ object AutomationController {
         tickerJob = null
         lastLoopsRepo = null
         ScreenOcrAnalyzer.onOcrSnapshotUpdated = null
-        runBlocking {
-            withTimeoutOrNull(2_000L) {
-                obs?.cancel()
-                tick?.cancel()
-                job?.cancelAndJoin()
-            }
-        }
+        obs?.cancel()
+        tick?.cancel()
+        job?.cancel()
     }
 
     private fun nextConfirmedSequence(): Long {
@@ -575,7 +571,7 @@ object AutomationController {
 
     fun endSessionAndClearData(context: Context) {
         ensureInitialized(context)
-        runBlocking {
+        controllerScope.launch {
             endSessionAndClearSessionData()
         }
     }

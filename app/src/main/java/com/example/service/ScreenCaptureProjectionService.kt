@@ -209,6 +209,19 @@ class ScreenCaptureProjectionService : Service() {
         stopSelf()
     }
 
+        override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        Log.i(TAG, "Configuration or orientation changed. Invalidating capture generation and recalibrating coordinates.")
+        ScreenOcrAnalyzer.nextCaptureGeneration()
+        ScreenColorSampler.updateFrame(null)
+        val proj = mediaProjection ?: return
+        val dm = resources.displayMetrics
+        val width = dm.widthPixels.coerceAtLeast(360)
+        val height = dm.heightPixels.coerceAtLeast(640)
+        val density = dm.densityDpi.coerceAtLeast(160)
+        runCatching { virtualDisplay?.resize(width, height, density) }
+    }
+
     override fun onDestroy() {
         stopProjectionResources()
         ScreenColorSampler.setCaptureActive(false, null)

@@ -22,6 +22,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.Locale
 import kotlin.math.abs
 
@@ -86,6 +88,7 @@ class LiveCrashPipeline(
     private var activeRoundRecorded: Boolean = false
     private var lastRecordedRoundId: String? = null
     private var lastRecordedDedupKey: String? = null
+    private val pipelineMutex = Mutex()
     private var recordedDedupKeysInSession = linkedSetOf<String>()
 
     private var latestPendingCandidate: PendingCrashCandidate? = null
@@ -109,7 +112,9 @@ class LiveCrashPipeline(
             pendingCrashFlow
                 .debounce(debounceWindowMs.coerceAtLeast(0L))
                 .collectLatest { candidate ->
-                    confirmAndEmitCandidate(candidate)
+                    pipelineMutex.withLock {
+                        confirmAndEmitCandidateLocked(candidate)
+                    }
                 }
         }
     }
@@ -352,11 +357,13 @@ class LiveCrashPipeline(
      * Flushes any pending debounced crash candidate immediately (used on clean round transition or tests).
      */
     suspend fun flushPendingNow() {
-        val pending = latestPendingCandidate ?: return
-        confirmAndEmitCandidate(pending)
+        pipelineMutex.withLock {
+            val pending = latestPendingCandidate ?: return@withLock
+            confirmAndEmitCandidateLocked(pending)
+        }
     }
 
-    private suspend fun confirmAndEmitCandidate(candidate: PendingCrashCandidate) {
+    private suspend fun confirmAndEmitCandidateLocked(candidate: PendingCrashCandidate) {
         if (candidate.sessionId != activeSessionId || activeSessionId.isBlank()) {
             return
         }

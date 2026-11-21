@@ -1379,8 +1379,13 @@ class AutomationEngine(
                 return
             }
 
+            val isBetReadyInTargets = step1Targets?.siteButtonState == SiteButtonState.IDLE_READY_TO_BET ||
+                (step1Targets?.isBetBtnDetected == true && step1Targets.isBetBtnEnabled)
             val observedPhaseStep1 = step1Targets?.gamePhase ?: lastObservedPhaseInEngine
-            if (observedPhaseStep1 != "BETTING_OPEN" && !(isManualTrigger && gameDetection.gameState.value.status == "BETTING_OPEN")) {
+            if (observedPhaseStep1 != "BETTING_OPEN" &&
+                !isBetReadyInTargets &&
+                !(isManualTrigger && (gameDetection.gameState.value.status == "BETTING_OPEN" || isBetReadyInTargets))
+            ) {
                 finishFailed("Betting window is not open (phase=$observedPhaseStep1).", episodeTag = "window_closed")
                 return
             }
@@ -1531,11 +1536,13 @@ class AutomationEngine(
                         return
                     }
                     val phaseStep6 = step6Targets?.gamePhase ?: lastObservedPhaseInEngine
-                    if (phaseStep6 != "BETTING_OPEN" && phaseStep6 != "WAITING_FOR_GAME") {
+                    val isBetReadyStep6 = step6Targets?.siteButtonState == SiteButtonState.IDLE_READY_TO_BET ||
+                        (step6Targets?.isBetBtnDetected == true && step6Targets.isBetBtnEnabled)
+                    if (phaseStep6 != "BETTING_OPEN" && phaseStep6 != "WAITING_FOR_GAME" && !isBetReadyStep6) {
                         finishFailed("Round phase changed to $phaseStep6 before BET click.", episodeTag = "phase_changed")
                         return
                     }
-                    if (!isManualTrigger && lastObservedPhaseInEngine != "BETTING_OPEN") {
+                    if (!isManualTrigger && lastObservedPhaseInEngine != "BETTING_OPEN" && !isBetReadyStep6) {
                         finishFailed("Round no longer in BETTING_OPEN before click.", episodeTag = "phase_changed")
                         return
                     }

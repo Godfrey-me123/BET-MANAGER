@@ -552,8 +552,7 @@ object ScreenOcrAnalyzer {
         val ageMs = (nowMs - ocrSnapshot.capturedAtMs).coerceAtLeast(0L)
         if (ageMs > maxOcrAgeMs) {
             val staleTargets = a11yTargets.copy(
-                ocrVerified = false,
-                conflictReasons = a11yTargets.conflictReasons + "OCR frame stale (${ageMs}ms > ${maxOcrAgeMs}ms)"
+                ocrVerified = false
             )
             return FusedScreenState(
                 fusedTargets = staleTargets,
@@ -561,8 +560,8 @@ object ScreenOcrAnalyzer {
                 hasConflict = false,
                 isOcrUncertain = false,
                 isStale = true,
-                conflictReasons = listOf("OCR frame stale (${ageMs}ms old)"),
-                verificationSummary = "OCR rejected: stale frame (${ageMs}ms)"
+                conflictReasons = emptyList(),
+                verificationSummary = "OCR frame expired (${ageMs}ms); relying on live Accessibility"
             )
         }
 
@@ -572,15 +571,14 @@ object ScreenOcrAnalyzer {
         if (parsed.isUncertain) {
             return FusedScreenState(
                 fusedTargets = a11yTargets.copy(
-                    ocrVerified = false,
-                    conflictReasons = listOfNotNull(parsed.uncertaintyReason)
+                    ocrVerified = false
                 ),
                 ocrParsed = parsed,
                 hasConflict = false,
                 isOcrUncertain = true,
                 isStale = false,
-                conflictReasons = listOfNotNull(parsed.uncertaintyReason),
-                verificationSummary = "OCR uncertain: ${parsed.uncertaintyReason ?: "low clarity"}"
+                conflictReasons = emptyList(),
+                verificationSummary = "OCR uncertain: ${parsed.uncertaintyReason ?: "low clarity"}; using live Accessibility"
             )
         }
 

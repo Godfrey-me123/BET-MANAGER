@@ -102,7 +102,7 @@ class FloatingHandsOverlayManager(
             }
 
             if (isRoundBetActive &&
-                phase == "IN_FLIGHT" &&
+                (phase == "IN_FLIGHT" || btnState == SiteButtonState.CASH_OUT_AVAILABLE) &&
                 btnState == SiteButtonState.CASH_OUT_AVAILABLE &&
                 targets.isCashOutBtnDetected &&
                 targets.isCashOutBtnEnabled &&
@@ -112,7 +112,7 @@ class FloatingHandsOverlayManager(
             }
 
             if (!isRoundBetActive &&
-                phase == "BETTING_OPEN" &&
+                (phase == "BETTING_OPEN" || btnState == SiteButtonState.IDLE_READY_TO_BET) &&
                 btnState == SiteButtonState.IDLE_READY_TO_BET &&
                 targets.isBetBtnDetected &&
                 targets.isBetBtnEnabled &&
@@ -504,14 +504,6 @@ class FloatingHandsOverlayManager(
         val limits = latestLimitsSnapshot
         when (val visual = latestVisualState) {
             UnifiedHandVisualState.BET_READY -> {
-                if (config.isAutoBetEnabled) {
-                    Toast.makeText(
-                        context,
-                        "BET is set to Automatic. Switch BET to Manual in Hand Settings to bet via tap.",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    return
-                }
                 automationEngine.executeVerifiedManualBet(config, limits) { _, msg ->
                     mainHandler.post {
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
@@ -520,14 +512,6 @@ class FloatingHandsOverlayManager(
             }
 
             UnifiedHandVisualState.CASH_OUT_READY -> {
-                if (config.isAutoCashOutEnabled) {
-                    Toast.makeText(
-                        context,
-                        "CASH OUT is set to Automatic. Switch CASH OUT to Manual in Hand Settings to cash out via tap.",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    return
-                }
                 automationEngine.executeVerifiedManualCashOut(config, limits) { _, msg ->
                     mainHandler.post {
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()

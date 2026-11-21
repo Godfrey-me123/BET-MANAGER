@@ -264,6 +264,31 @@ class StrategyEngine {
         _latestStakeInstruction.value = instruction
     }
 
+    fun cancelPatternSession(reason: String = "Pattern Expired") {
+        if (!state.isBettingSessionActive) return
+        val cleanBase = roundStake(_boundConfig.value.baseStake)
+        val (masterMode, masterAddAmount) = resolveEffectiveProgression(_boundConfig.value)
+        state = state.copy(
+            isBettingSessionActive = false,
+            activeRuleId = null,
+            activeRuleLabel = null,
+            currentCalculatedStake = cleanBase,
+            currentStakeLevel = 1,
+            consecutiveWinsInSession = 0,
+            consecutiveLossesInSession = 0
+        )
+        publishStakeInstruction(
+            stake = cleanBase,
+            mode = masterMode,
+            addAmount = masterAddAmount,
+            targetMultiplier = _boundConfig.value.targetMultiplier,
+            stakeLevel = 1,
+            isSessionActive = false,
+            reason = reason
+        )
+        safeLogI("Pattern session cancelled: $reason")
+    }
+
     fun reset(baseStake: Double = _boundConfig.value.baseStake) {
         val cleanBase = roundStake(baseStake)
         val boundEnabledIds = _boundConfig.value.getRuleConfigs()

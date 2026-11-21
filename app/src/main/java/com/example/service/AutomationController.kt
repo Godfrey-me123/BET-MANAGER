@@ -606,6 +606,11 @@ object AutomationController {
                     cfg.automationMasterEnabled
                 val effectiveMult = if (detection.gamePhase == "IN_FLIGHT") {
                     detection.detectedMultiplier ?: 0.0
+                } else if (detection.gamePhase == "CRASHED") {
+                    detection.detectedMultiplier
+                        ?: currentEngine.gameDetection.gameState.value.currentMultiplier.takeIf { it >= 1.0 }
+                        ?: detection.uiTargets.ribbonMultipliers.firstOrNull()
+                        ?: 0.0
                 } else {
                     detection.detectedMultiplier
                         ?: currentEngine.gameDetection.gameState.value.currentMultiplier
@@ -1408,6 +1413,11 @@ object AutomationController {
                     )
                     val liveMultNoRibbon = if (detection.gamePhase == "IN_FLIGHT") {
                         detection.detectedMultiplier ?: 0.0
+                    } else if (detection.gamePhase == "CRASHED") {
+                        detection.detectedMultiplier
+                            ?: currentEngine.gameDetection.gameState.value.currentMultiplier.takeIf { it >= 1.0 }
+                            ?: targets.ribbonMultipliers.firstOrNull()
+                            ?: 0.0
                     } else {
                         detection.detectedMultiplier
                             ?: currentEngine.gameDetection.gameState.value.currentMultiplier
@@ -1595,6 +1605,11 @@ object AutomationController {
                 // Drive live phase execution (BETTING_OPEN stake/bet placement + IN_FLIGHT cash-out)
                 val liveMult = if (detection.gamePhase == "IN_FLIGHT") {
                     detection.detectedMultiplier ?: 0.0
+                } else if (detection.gamePhase == "CRASHED") {
+                    detection.detectedMultiplier
+                        ?: currentEngine.gameDetection.gameState.value.currentMultiplier.takeIf { it >= 1.0 }
+                        ?: targets.ribbonMultipliers.firstOrNull()
+                        ?: 0.0
                 } else {
                     detection.detectedMultiplier
                         ?: currentEngine.gameDetection.gameState.value.currentMultiplier

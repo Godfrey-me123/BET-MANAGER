@@ -1355,6 +1355,10 @@ class AutomationEngine(
             if (emitNotice) {
                 emitEpisodeFailureNotice(episodeTag, "Bet Aborted", reason)
             }
+            if (!currentRoundBetActive && !gameDetection.gameState.value.isBetPlaced) {
+                strategyEngine.cancelPatternSession(reason)
+                currentRoundBetAttemptLockKey = null
+            }
             isActionInProgress.set(false)
             onFinished?.invoke(false, reason)
         }

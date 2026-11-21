@@ -199,7 +199,7 @@ class LiveCrashPipeline(
         when (phase) {
             "BETTING_OPEN" -> {
                 // If transitioning directly from an un-settled flight, confirm that round before starting next
-                val prevPeak = lastFlightPeakMultiplier
+                val prevPeak = lastFlightPeakMultiplier ?: detection.uiTargets.ribbonMultipliers.firstOrNull()
                 if (!activeRoundRecorded && prevPeak != null && prevPeak >= 1.0 &&
                     (_lifecycleState.value == RoundLifecycleState.MULTIPLIER_RISING ||
                         _lifecycleState.value == RoundLifecycleState.ROUND_STARTED)
@@ -270,6 +270,7 @@ class LiveCrashPipeline(
             "CRASHED" -> {
                 val crashedValue = mult?.takeIf { it.isFinite() && it >= 1.0 }
                     ?: lastFlightPeakMultiplier?.takeIf { it.isFinite() && it >= 1.0 }
+                    ?: detection.uiTargets.ribbonMultipliers.firstOrNull()?.takeIf { it.isFinite() && it >= 1.0 }
                     ?: return
 
                 val incomingRoundId = detection.roundId?.takeIf { it.isNotBlank() }

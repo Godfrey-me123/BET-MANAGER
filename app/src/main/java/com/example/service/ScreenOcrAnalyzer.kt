@@ -249,6 +249,18 @@ object ScreenOcrAnalyzer {
         )
     }
 
+    fun parseCandidateMultiplier(rawText: String): Double? {
+        val clean = rawText.trim().replace(',', '.')
+        val withX = Regex("""(?:^|[@xX\s])(\d{1,4}\.\d{1,2})\s*[xX]?""").find(clean)
+        val v1 = withX?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+        if (v1 != null && v1 >= 1.00) return v1
+
+        val pureDec = Regex("""^(\d{1,4}\.\d{1,2})$""").find(clean)
+        val v2 = pureDec?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+        if (v2 != null && v2 >= 1.00) return v2
+        return null
+    }
+
     fun parseOcrSnapshot(
         snapshot: OcrFrameSnapshot,
         adapter: GameAdapter? = null,
@@ -298,6 +310,7 @@ object ScreenOcrAnalyzer {
         var autoTargetVal: Double? = null
         var countdownMs: Long? = null
         var liveMult: Double? = null
+        var crashedMult: Double? = null
         var sawFlewAway = false
         var sawWaitNextRound = false
         var uncertaintyReason: String? = null
@@ -307,6 +320,10 @@ object ScreenOcrAnalyzer {
         for ((el, lower) in lowerElements) {
             if (lower.contains("flew away") || lower.contains("crashed") || lower.contains("busted")) {
                 sawFlewAway = true
+                val embedded = parseCandidateMultiplier(el.text)
+                if (embedded != null && embedded >= 1.0) {
+                    crashedMult = embedded
+                }
             }
             if (lower.contains("waiting for next round") ||
                 lower.contains("place your bet") ||
@@ -378,19 +395,20 @@ object ScreenOcrAnalyzer {
                 }
             }
 
-            // Live center multiplier detection (exclude currency/auto/ribbon top area)
-            val isInTopRibbon = snapshot.frameHeight > 0 && el.bounds.centerY() < (snapshot.frameHeight * 0.20f)
-            if (!isInTopRibbon &&
+            // Live center multiplier detection (exclude currency/auto/ribbon top area & bottom buttons)
+            val isInTopRibbon = snapshot.frameHeight > 0 && el.bounds.centerY() < (snapshot.frameHeight * 0.18f)
+            val isBottomControls = snapshot.frameHeight > 0 && el.bounds.centerY() > (snapshot.frameHeight * 0.82f)
+            if (!isInTopRibbon && !isBottomControls &&
                 !lower.contains("auto") &&
                 !lower.contains("cash") &&
                 !lower.contains("bet") &&
-                !lower.contains("balance")
+                !lower.contains("balance") &&
+                !lower.contains("total")
             ) {
-                val multMatch = Regex("""^(\d+(?:\.\d{1,2})?)x$""").find(lower)
-                val valMult = multMatch?.groupValues?.getOrNull(1)?.toDoubleOrNull()
-                if (valMult != null && valMult >= 1.00) {
-                    if (liveMult == null) {
-                        liveMult = valMult
+                val candidate = parseCandidateMultiplier(el.text)
+                if (candidate != null && candidate >= 1.00) {
+                    if (liveMult == null || candidate > liveMult) {
+                        liveMult = candidate
                     }
                 }
             }
@@ -509,7 +527,7 @@ object ScreenOcrAnalyzer {
             detectedGameName = resolvedAdapter?.displayedGameName?.takeIf { it != "Unknown" },
             roundPhase = resolvedPhase,
             siteButtonState = resolvedBtnState,
-            detectedMultiplier = liveMult,
+            detectedMultiplier = if (sawFlewAway) (crashedMult ?: liveMult) else liveMult,
             countdownRemainingMs = countdownMs,
             betControl = betCandidate,
             cashOutControl = cashOutCandidate,
@@ -631,13 +649,14 @@ object ScreenOcrAnalyzer {
         val resolvedCancelBounds = a11yTargets.cancelButtonBounds ?: parsed.cancelControl?.bounds
         val resolvedDoubleBounds = a11yTargets.doubleButtonBounds ?: parsed.doubleControl?.bounds
 
-        val fusedPhase = if (a11yTargets.gamePhase == "WAITING_FOR_GAME" && parsed.roundPhase != null) {
-            parsed.roundPhase
-        } else {
-            a11yTargets.gamePhase
+        val fusedPhase = when {
+            parsed.roundPhase == "CRASHED" -> "CRASHED"
+            parsed.roundPhase == "IN_FLIGHT" -> "IN_FLIGHT"
+            a11yTargets.gamePhase == "WAITING_FOR_GAME" && parsed.roundPhase != null -> parsed.roundPhase
+            else -> a11yTargets.gamePhase
         }
-        val resolvedMultiplier = a11yTargets.detectedMultiplier
-            ?: parsed.detectedMultiplier?.takeIf { conflicts.isEmpty() }
+        val resolvedMultiplier = parsed.detectedMultiplier
+            ?: a11yTargets.detectedMultiplier
 
         val fusedTargets = a11yTargets.copy(
             gamePhase = fusedPhase,

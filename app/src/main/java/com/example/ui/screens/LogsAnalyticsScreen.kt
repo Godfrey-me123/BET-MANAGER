@@ -40,6 +40,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -78,6 +79,11 @@ private enum class HistoryScopeFilter(val label: String) {
     FULL_HISTORY("Full History")
 }
 
+private enum class LogsSectionMode(val label: String) {
+    CRASH_HISTORY("Crash History"),
+    APP_LOGS("App Logs")
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun LogsAnalyticsScreen(
@@ -99,6 +105,7 @@ fun LogsAnalyticsScreen(
     onClearHistoryByScope: ((ClearHistoryScope, String) -> Unit)? = null
 ) {
     val config = strategyConfig ?: StrategyConfig()
+    var sectionMode by remember { mutableStateOf(LogsSectionMode.CRASH_HISTORY) }
     var scopeFilter by remember { mutableStateOf(HistoryScopeFilter.CURRENT_SESSION) }
     var expandedRecordKey by remember { mutableStateOf<String?>(null) }
     var showClearScopeDialog by remember { mutableStateOf(false) }
@@ -157,43 +164,64 @@ fun LogsAnalyticsScreen(
     val isOverlayHost = LocalActivityResultRegistryOwner.current == null
     val hasBackOwner = LocalOnBackPressedDispatcherOwner.current != null
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    @Composable
+    fun SectionSwitcherRow(modifier: Modifier = Modifier) {
+        Row(
+            modifier = modifier,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilterChip(
+                selected = sectionMode == LogsSectionMode.CRASH_HISTORY,
+                onClick = { sectionMode = LogsSectionMode.CRASH_HISTORY },
+                label = { Text(LogsSectionMode.CRASH_HISTORY.label, fontSize = 11.sp, maxLines = 1) },
+                modifier = Modifier.testTag("logs_section_crash_history")
+            )
+            FilterChip(
+                selected = sectionMode == LogsSectionMode.APP_LOGS,
+                onClick = { sectionMode = LogsSectionMode.APP_LOGS },
+                label = { Text(LogsSectionMode.APP_LOGS.label, fontSize = 11.sp, maxLines = 1) },
+                modifier = Modifier.testTag("logs_section_app_logs")
+            )
+        }
+    }
+
+    if (sectionMode == LogsSectionMode.APP_LOGS) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            SectionSwitcherRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+            DiagnosticLogsPanel(modifier = Modifier.fillMaxSize().weight(1f))
+        }
+    } else {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
             .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
-            Spacer(modifier = Modifier.height(10.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "CRASH HISTORY",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = PrimaryCobalt
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
+                SectionSwitcherRow(modifier = Modifier.weight(1f))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
                         onClick = onCollectHistory,
                         modifier = Modifier.testTag("history_sync_btn")
                     ) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Sync", modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Sync", fontSize = 11.sp)
+                        Icon(Icons.Default.Refresh, contentDescription = "Sync", tint = PrimaryCobalt)
                     }
-                    OutlinedButton(
+                    IconButton(
                         onClick = { showClearScopeDialog = true },
                         modifier = Modifier.testTag("history_clear_scope_btn")
                     ) {
-                        Icon(Icons.Default.Delete, contentDescription = "Clear History", tint = ActionStopRed, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Clear", fontSize = 11.sp, color = ActionStopRed)
+                        Icon(Icons.Default.Delete, contentDescription = "Clear History", tint = ActionStopRed)
                     }
                 }
             }
@@ -420,6 +448,7 @@ fun LogsAnalyticsScreen(
 
         item { Spacer(modifier = Modifier.height(88.dp)) }
     }
+        } // end crash history branch
 
     if (showClearScopeDialog) {
         if (hasBackOwner) {

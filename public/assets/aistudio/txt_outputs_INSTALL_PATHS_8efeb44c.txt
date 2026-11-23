@@ -1,0 +1,12 @@
+Place each file into the matching path under app/src/main/java/com/example/:
+
+AccessibilityController.kt          -> service/AccessibilityController.kt
+AutomationEngine.kt                  -> data/engine/AutomationEngine.kt
+FloatingHandsOverlayManager.kt       -> service/FloatingHandsOverlayManager.kt
+AppLogManager.kt                     -> service/AppLogManager.kt          (NEW)
+AppLogEntry.kt                       -> data/model/AppLogEntry.kt         (NEW)
+DiagnosticLogsPanel.kt               -> ui/screens/DiagnosticLogsPanel.kt (NEW)
+LogsAnalyticsScreen.kt               -> ui/screens/LogsAnalyticsScreen.kt
+
+After copy: Rebuild APK. Open Logs / History tab -> switch to "App Logs".
+Use Copy All to copy success + error lines to clipboard.

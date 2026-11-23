@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Single authoritative transaction manager shared across AutomationEngine,
@@ -21,6 +22,8 @@ import java.util.concurrent.ConcurrentHashMap
 class BetTransactionManager {
     private val mutex = Mutex()
     private val activeTransactions = ConcurrentHashMap<String, BetTransactionRecord>()
+    private val journalOrder = ConcurrentHashMap<String, Long>()
+    private val orderSeq = AtomicLong(0L)
     private val settledRoundIds = ConcurrentHashMap.newKeySet<String>()
 
     private val _currentTransaction = MutableStateFlow<BetTransactionRecord?>(null)
@@ -50,6 +53,7 @@ class BetTransactionManager {
             evidenceList.add(TransactionEvidence("INTENT_RECORDED", timestampMs, "Stake: $intendedStake, Target: ${targetMultiplier}x"))
         }
         activeTransactions[transactionId] = record
+        journalOrder[transactionId] = orderSeq.incrementAndGet()
         _currentTransaction.value = record
         publishJournal()
         record
@@ -251,13 +255,19 @@ class BetTransactionManager {
 
     fun resetForTesting() {
         activeTransactions.clear()
+        journalOrder.clear()
         settledRoundIds.clear()
         _currentTransaction.value = null
         _recentJournal.value = emptyList()
     }
 
     private fun publishJournal() {
-        _recentJournal.value = activeTransactions.values.sortedByDescending { it.createdAtMs }.take(50)
+        _recentJournal.value = activeTransactions.values
+            .sortedWith(
+                compareByDescending<BetTransactionRecord> { it.createdAtMs }
+                    .thenByDescending { journalOrder[it.transactionId] ?: 0L }
+            )
+            .take(50)
     }
 
     companion object {

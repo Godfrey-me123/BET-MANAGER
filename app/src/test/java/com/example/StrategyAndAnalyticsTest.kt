@@ -1009,7 +1009,7 @@ class StrategyAndAnalyticsTest {
         )
         assertTrue(betClickCoords.isEmpty())
 
-        // Once site button is IDLE_READY_TO_BET ("Bet"), engine dispatches bet WITHOUT blindly falling back to stale shortcut coords (777, 888)
+        // Once site button is IDLE_READY_TO_BET ("Bet"), engine dispatches bet using matching SportyBet shortcut coords (777, 888)
         engine.handlePhaseUpdate(
             phase = "BETTING_OPEN",
             liveMultiplier = 1.00,
@@ -1019,7 +1019,7 @@ class StrategyAndAnalyticsTest {
             siteButtonState = com.example.data.model.SiteButtonState.IDLE_READY_TO_BET
         )
         assertEquals(1, betClickCoords.size)
-        assertEquals(null to null, betClickCoords.single())
+        assertEquals(777f to 888f, betClickCoords.single())
     }
 
     @Test

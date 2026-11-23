@@ -81,6 +81,18 @@ class FloatingHandsOverlayManager(
         fun hasVisibleHands(): Boolean = activeManagers.any { it.hasActiveViews() }
 
         /**
+         * Live center of the visible Action Hand (user-placed click target).
+         * Prefer this over DB shortcuts so a just-dragged hand works immediately.
+         */
+        fun getLiveHandCenter(): Pair<Float, Float>? {
+            for (manager in activeManagers) {
+                val center = manager.readLiveCenter()
+                if (center != null) return center
+            }
+            return null
+        }
+
+        /**
          * Resolves the unified hand's visual state & valid action strictly from verified live state.
          * Never exposes BET or CASH OUT when unsafe, conflicting, or invalid for the current round phase.
          */
@@ -152,6 +164,17 @@ class FloatingHandsOverlayManager(
     private var latestLimitsSnapshot: RiskLimits = RiskLimits()
 
     fun hasActiveViews(): Boolean = unifiedHandView != null
+
+    /** Current center of the floating hand on screen, or null if not visible. */
+    fun readLiveCenter(): Pair<Float, Float>? {
+        val view = unifiedHandView ?: return null
+        val lp = unifiedLayoutParams ?: return null
+        if (!view.isAttachedToWindow) return null
+        val size = dpToPx(64)
+        val cx = lp.x + size / 2f
+        val cy = lp.y + size / 2f
+        return if (cx > 0f && cy > 0f) cx to cy else null
+    }
 
     init {
         activeManagers.add(this)
@@ -556,6 +579,7 @@ class FloatingHandsOverlayManager(
                 val matchedExisting = allExisting.firstOrNull { knownId != null && it.id == knownId }
                     ?: allExisting.firstOrNull { it.label == "ACTION HAND" }
 
+                // User-placed hand position IS the click target. Keep visual + target in sync.
                 val shortcut = FloatingShortcut(
                     id = matchedExisting?.id ?: 0L,
                     label = "ACTION HAND",
@@ -563,8 +587,8 @@ class FloatingHandsOverlayManager(
                     panelId = 1,
                     visualX = centerX,
                     visualY = centerY,
-                    targetX = matchedExisting?.targetX ?: 0f,
-                    targetY = matchedExisting?.targetY ?: 0f,
+                    targetX = centerX,
+                    targetY = centerY,
                     targetMultiplier = latestConfigSnapshot.targetMultiplier,
                     targetPlatform = activeSite,
                     backgroundColorHex = "#16A34A",

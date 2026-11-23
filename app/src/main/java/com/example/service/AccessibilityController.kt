@@ -2663,10 +2663,10 @@ open class AccessibilityController : AccessibilityService() {
     }
 
     /**
-     * Clicks the BET button ONLY after freshly re-scanning the live screen, confirming button identity,
-     * a verified clickable+enabled node (or enclosing clickable parent), enabled state, phase
-     * (BETTING_OPEN / IDLE_READY_TO_BET), and zero collision with 2x/Cancel/CashOut/AutoCashOut.
-     * NEVER falls back to tapping inert unclickable text bounds or stale coordinates.
+     * Simple BET click.
+     * Prefer the coordinates the user placed with the Action Hand (fallbackX/Y).
+     * Only fall back to a live accessibility scan when no hand coordinates are available.
+     * Removes the previous multi-pass OCR/collision/layout-settle gates that blocked auto-bets.
      */
     fun clickBetTarget(
         fallbackX: Float? = null,
@@ -2674,74 +2674,57 @@ open class AccessibilityController : AccessibilityService() {
         onComplete: ((Boolean) -> Unit)? = null
     ) {
         try {
+            // 1. Prefer user-placed hand coordinates (the verified position).
+            if (fallbackX != null && fallbackY != null &&
+                fallbackX.isFinite() && fallbackY.isFinite() &&
+                fallbackX > 0f && fallbackY > 0f
+            ) {
+                safeLogI(TAG, "clickBetTarget using hand coordinates ($fallbackX, $fallbackY)")
+                AppLogManager.i("Gesture", "BET click via hand", details = "($fallbackX, $fallbackY)")
+                FloatingHandsOverlayManager.pulsePassThroughAll(280L)
+                dispatchTouchGesture(fallbackX, fallbackY) { ok ->
+                    if (ok) AppLogManager.success("Gesture", "BET gesture dispatched", coordinates = fallbackX to fallbackY)
+                    else AppLogManager.e("Gesture", "BET gesture failed", coordinates = fallbackX to fallbackY)
+                    onComplete?.invoke(ok)
+                }
+                return
+            }
+
+            // 2. No hand coords -> light live scan (still no heavy OCR conflict / multi-settle gates).
             val pair = resolveBestTargetWindowRoot()
             if (pair == null) {
-                safeLogW(TAG, "clickBetTarget aborted: no active window root")
+                safeLogW(TAG, "clickBetTarget aborted: no active window root and no hand coords")
+                AppLogManager.e("Gesture", "BET click aborted", details = "no window root and no hand coords")
                 onComplete?.invoke(false)
                 return
             }
             val (root, shouldRecycle) = pair
-            var verifiedClickBounds: Rect? = null
-            var collisionError: String? = null
-            var betEnabled = false
-            var betClickable = false
-            var siteState = SiteButtonState.UNKNOWN
+            var clickX: Float? = null
+            var clickY: Float? = null
             try {
-                val rawTargets = scanWindowTargets(root)
-                val pkg = safeNodePackageName(root).ifBlank { rawTargets.foregroundPackage }
-                val fused = ScreenOcrAnalyzer.fuseAccessibilityAndOcr(
-                    a11yTargets = rawTargets.copy(foregroundPackage = pkg),
-                    ocrSnapshot = ScreenOcrAnalyzer.latestOcrSnapshot.value,
-                    adapter = null,
-                    nowMs = System.currentTimeMillis()
-                )
-                val targets = fused.fusedTargets
+                val targets = scanWindowTargets(root)
                 _detectedTargets.value = targets
-                siteState = targets.siteButtonState
-                betEnabled = targets.isBetBtnEnabled
-                betClickable = targets.isBetBtnClickable
-                collisionError = targets.detectBetCollisionReason()
-                    ?: fused.conflictReasons.firstOrNull()?.takeIf { fused.hasConflict }
-                if (collisionError == null && targets.isBetBtnDetected && targets.isBetBtnEnabled &&
-                    targets.isBetBtnClickable &&
-                    targets.siteButtonState == SiteButtonState.IDLE_READY_TO_BET &&
-                    !fused.hasConflict
-                ) {
-                    val scannedBounds = targets.betButtonBounds?.takeIf { !it.isEmpty }
-                    verifiedClickBounds = scannedBounds?.let { findClickableButtonBounds(root, it, isCashOut = false) }
+                val bounds = targets.betButtonBounds?.takeIf { !it.isEmpty }
+                if (bounds != null && targets.isBetBtnDetected && targets.isBetBtnClickable && targets.isBetBtnEnabled) {
+                    clickX = bounds.centerX().toFloat()
+                    clickY = bounds.centerY().toFloat()
                 }
             } finally {
                 if (shouldRecycle) safeRecycleRoot(root)
             }
 
-            if (collisionError != null || !betEnabled || !betClickable ||
-                siteState != SiteButtonState.IDLE_READY_TO_BET || verifiedClickBounds == null || verifiedClickBounds.isEmpty
-            ) {
-                safeLogW(TAG, "clickBetTarget blocked by live validation: state=$siteState enabled=$betEnabled clickable=$betClickable clickBounds=$verifiedClickBounds reason=$collisionError")
-                onComplete?.invoke(false)
-                return
-            }
-            val settledBounds = awaitStableLayout()?.takeIf { !it.isEmpty }
-            if (settledBounds == null) {
-                safeLogW(TAG, "clickBetTarget aborted: settled clickable BET bounds unavailable")
-                onComplete?.invoke(false)
-                return
-            }
-            // Re-verify clickable+enabled node on settled root immediately before touch dispatch
-            val settledPair = resolveBestTargetWindowRoot()
-            var finalClickBounds: Rect? = null
-            if (settledPair != null) {
-                val (sRoot, sRecycle) = settledPair
-                try {
-                    finalClickBounds = findClickableButtonBounds(sRoot, settledBounds, isCashOut = false)
-                } finally {
-                    if (sRecycle) safeRecycleRoot(sRoot)
+            if (clickX != null && clickY != null) {
+                safeLogI(TAG, "clickBetTarget using scanned BET bounds ($clickX, $clickY)")
+                AppLogManager.i("Gesture", "BET click via scan", details = "($clickX, $clickY)")
+                FloatingHandsOverlayManager.pulsePassThroughAll(280L)
+                dispatchTouchGesture(clickX, clickY) { ok ->
+                    if (ok) AppLogManager.success("Gesture", "BET gesture dispatched", coordinates = clickX to clickY)
+                    else AppLogManager.e("Gesture", "BET gesture failed", coordinates = clickX to clickY)
+                    onComplete?.invoke(ok)
                 }
-            }
-            if (finalClickBounds != null && !finalClickBounds.isEmpty) {
-                dispatchTouchGesture(finalClickBounds.centerX().toFloat(), finalClickBounds.centerY().toFloat(), onComplete)
             } else {
-                safeLogW(TAG, "clickBetTarget aborted: clickable BET node missing after layout settle")
+                safeLogW(TAG, "clickBetTarget aborted: no hand coords and clickable BET button not found on screen")
+                AppLogManager.e("Gesture", "BET click aborted", details = "no hand coords and BET button not found")
                 onComplete?.invoke(false)
             }
         } catch (t: Throwable) {
@@ -2751,9 +2734,9 @@ open class AccessibilityController : AccessibilityService() {
     }
 
     /**
-     * Clicks CASH OUT ONLY after freshly re-scanning the live screen and confirming Cash Out availability,
-     * a verified clickable+enabled node (or enclosing clickable parent), and zero control collision.
-     * Uses stable clickable bounds with dispatchTouchGesture only.
+     * Simple CASH OUT click.
+     * Prefer the coordinates the user placed with the Action Hand (fallbackX/Y).
+     * Only fall back to a live accessibility scan when no hand coordinates are available.
      */
     fun clickCashOutTarget(
         fallbackX: Float? = null,
@@ -2761,73 +2744,55 @@ open class AccessibilityController : AccessibilityService() {
         onComplete: ((Boolean) -> Unit)? = null
     ) {
         try {
+            if (fallbackX != null && fallbackY != null &&
+                fallbackX.isFinite() && fallbackY.isFinite() &&
+                fallbackX > 0f && fallbackY > 0f
+            ) {
+                safeLogI(TAG, "clickCashOutTarget using hand coordinates ($fallbackX, $fallbackY)")
+                AppLogManager.i("Gesture", "CASH OUT click via hand", details = "($fallbackX, $fallbackY)")
+                FloatingHandsOverlayManager.pulsePassThroughAll(280L)
+                dispatchTouchGesture(fallbackX, fallbackY) { ok ->
+                    if (ok) AppLogManager.success("Gesture", "CASH OUT gesture dispatched", coordinates = fallbackX to fallbackY)
+                    else AppLogManager.e("Gesture", "CASH OUT gesture failed", coordinates = fallbackX to fallbackY)
+                    onComplete?.invoke(ok)
+                }
+                return
+            }
+
             val pair = resolveBestTargetWindowRoot()
             if (pair == null) {
-                safeLogW(TAG, "clickCashOutTarget aborted: no active window root")
+                safeLogW(TAG, "clickCashOutTarget aborted: no active window root and no hand coords")
+                AppLogManager.e("Gesture", "CASH OUT aborted", details = "no window root and no hand coords")
                 onComplete?.invoke(false)
                 return
             }
             val (root, shouldRecycle) = pair
-            var verifiedClickBounds: Rect? = null
-            var collisionError: String? = null
-            var cashOutEnabled = false
-            var cashOutClickable = false
-            var siteState = SiteButtonState.UNKNOWN
+            var clickX: Float? = null
+            var clickY: Float? = null
             try {
-                val rawTargets = scanWindowTargets(root)
-                val pkg = safeNodePackageName(root).ifBlank { rawTargets.foregroundPackage }
-                val fused = ScreenOcrAnalyzer.fuseAccessibilityAndOcr(
-                    a11yTargets = rawTargets.copy(foregroundPackage = pkg),
-                    ocrSnapshot = ScreenOcrAnalyzer.latestOcrSnapshot.value,
-                    adapter = null,
-                    nowMs = System.currentTimeMillis()
-                )
-                val targets = fused.fusedTargets
+                val targets = scanWindowTargets(root)
                 _detectedTargets.value = targets
-                siteState = targets.siteButtonState
-                cashOutEnabled = targets.isCashOutBtnEnabled
-                cashOutClickable = targets.isCashOutBtnClickable
-                collisionError = targets.detectCashOutCollisionReason()
-                    ?: fused.conflictReasons.firstOrNull()?.takeIf { fused.hasConflict }
-                if (collisionError == null && targets.isCashOutBtnDetected && targets.isCashOutBtnEnabled &&
-                    targets.isCashOutBtnClickable &&
-                    targets.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE &&
-                    !fused.hasConflict
-                ) {
-                    val scannedBounds = targets.cashOutButtonBounds?.takeIf { !it.isEmpty }
-                    verifiedClickBounds = scannedBounds?.let { findClickableButtonBounds(root, it, isCashOut = true) }
+                val bounds = targets.cashOutButtonBounds?.takeIf { !it.isEmpty }
+                if (bounds != null && targets.isCashOutBtnDetected && targets.isCashOutBtnClickable && targets.isCashOutBtnEnabled) {
+                    clickX = bounds.centerX().toFloat()
+                    clickY = bounds.centerY().toFloat()
                 }
             } finally {
                 if (shouldRecycle) safeRecycleRoot(root)
             }
 
-            if (collisionError != null || !cashOutEnabled || !cashOutClickable ||
-                siteState != SiteButtonState.CASH_OUT_AVAILABLE || verifiedClickBounds == null || verifiedClickBounds.isEmpty
-            ) {
-                safeLogW(TAG, "clickCashOutTarget blocked by live validation: state=$siteState enabled=$cashOutEnabled clickable=$cashOutClickable clickBounds=$verifiedClickBounds reason=$collisionError")
-                onComplete?.invoke(false)
-                return
-            }
-            val settledBounds = awaitStableCashOutLayout()?.takeIf { !it.isEmpty }
-            if (settledBounds == null) {
-                safeLogW(TAG, "clickCashOutTarget aborted: settled clickable CASH OUT bounds unavailable")
-                onComplete?.invoke(false)
-                return
-            }
-            val settledPair = resolveBestTargetWindowRoot()
-            var finalClickBounds: Rect? = null
-            if (settledPair != null) {
-                val (sRoot, sRecycle) = settledPair
-                try {
-                    finalClickBounds = findClickableButtonBounds(sRoot, settledBounds, isCashOut = true)
-                } finally {
-                    if (sRecycle) safeRecycleRoot(sRoot)
+            if (clickX != null && clickY != null) {
+                safeLogI(TAG, "clickCashOutTarget using scanned CASH OUT bounds ($clickX, $clickY)")
+                AppLogManager.i("Gesture", "CASH OUT click via scan", details = "($clickX, $clickY)")
+                FloatingHandsOverlayManager.pulsePassThroughAll(280L)
+                dispatchTouchGesture(clickX, clickY) { ok ->
+                    if (ok) AppLogManager.success("Gesture", "CASH OUT gesture dispatched", coordinates = clickX to clickY)
+                    else AppLogManager.e("Gesture", "CASH OUT gesture failed", coordinates = clickX to clickY)
+                    onComplete?.invoke(ok)
                 }
-            }
-            if (finalClickBounds != null && !finalClickBounds.isEmpty) {
-                dispatchTouchGesture(finalClickBounds.centerX().toFloat(), finalClickBounds.centerY().toFloat(), onComplete)
             } else {
-                safeLogW(TAG, "clickCashOutTarget aborted: clickable CASH OUT node missing after layout settle")
+                safeLogW(TAG, "clickCashOutTarget aborted: no hand coords and clickable CASH OUT button not found")
+                AppLogManager.e("Gesture", "CASH OUT aborted", details = "no hand coords and CASH OUT button not found")
                 onComplete?.invoke(false)
             }
         } catch (t: Throwable) {

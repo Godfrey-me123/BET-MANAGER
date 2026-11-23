@@ -125,9 +125,15 @@ class ScreenEarnerAccessibilityService : AccessibilityController() {
             val boundedConfidence = confidence.coerceIn(0f, 1f)
 
             val hasGameControls = targets.isBetBtnDetected || targets.isCancelBtnDetected || targets.isCashOutBtnDetected
-            val gameDetected = resolvedAdapter != null ||
-                (hasMultiplierSignals && hasGameControls) ||
-                (targets.detectedBalance != null && hasGameControls)
+            // A browser package, a visible balance or arbitrary OCR text is NOT a crash game. Require a recognised
+            // game adapter, or real crash-game controls/numbers on screen (live multiplier, history ribbon,
+            // Bet / Cancel / Cash Out control).
+            val hasCrashGameSignals = targets.detectedMultiplier != null ||
+                targets.ribbonMultipliers.size >= 3 ||
+                targets.isBetBtnDetected ||
+                targets.isCashOutBtnDetected ||
+                targets.isCancelBtnDetected
+            val gameDetected = (resolvedAdapter != null && resolvedAdapter.gameId != "unknown") || hasCrashGameSignals
 
             val missing = buildList {
                 if (!targets.isBetBtnDetected && !targets.isCancelBtnDetected &&
@@ -153,7 +159,12 @@ class ScreenEarnerAccessibilityService : AccessibilityController() {
                 detectedRoundId = targets.detectedCurrentRoundId,
                 originalDetectedTitle = resolvedGameTitle,
                 supportedPlatforms = allSupportedPlatforms,
-                isReady = gameDetected && hasMultiplierSignals && hasGameControls && !fusedResult.hasConflict && !fusedResult.isOcrUncertain && boundedConfidence >= 0.50f,
+                isReady = gameDetected && hasMultiplierSignals && !fusedResult.hasConflict &&
+                    // Mid-flight the Bet button can be hidden and OCR noisy; a live a11y multiplier is enough to stay ready
+                    // so an open bet can still be cashed out.
+                    (hasGameControls || targets.detectedMultiplier != null) &&
+                    (!fusedResult.isOcrUncertain || targets.detectedMultiplier != null) &&
+                    (targets.detectedMultiplier != null || boundedConfidence >= 0.50f),
                 gamePhase = targets.gamePhase,
                 missingElements = missing,
                 detectedMultiplier = targets.detectedMultiplier,

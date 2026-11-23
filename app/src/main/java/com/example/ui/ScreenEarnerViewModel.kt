@@ -459,7 +459,9 @@ class ScreenEarnerViewModel(application: Application) : AndroidViewModel(applica
             stakeEditTimeoutMs = config.stakeEditTimeoutMs.coerceIn(150L, 5_000L),
             autoCashOutTimeoutMs = config.autoCashOutTimeoutMs.coerceIn(150L, 5_000L),
             betWindowTotalTimeoutMs = config.betWindowTotalTimeoutMs.coerceIn(500L, 15_000L),
-            minRemainingBetWindowMs = config.minRemainingBetWindowMs.coerceIn(300L, 10_000L)
+            minRemainingBetWindowMs = config.minRemainingBetWindowMs.coerceIn(300L, 10_000L),
+            minStake = config.minStake.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0,
+            maxStake = config.maxStake.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
         ).withUpdatedRuleConfigs(sanitizedRules)
     }
 

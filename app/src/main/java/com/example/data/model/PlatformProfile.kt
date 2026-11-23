@@ -10,5 +10,7 @@ data class PlatformProfile(
     val platformName: String, // "BetPawa", "SportyBet", "Custom"
     val orientation: String, // "PORTRAIT", "LANDSCAPE"
     val isActive: Boolean = false,
-    val description: String = ""
+    val description: String = "",
+    val minStake: Double = 1.0,
+    val maxStake: Double = 1_000_000.0
 )

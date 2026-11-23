@@ -61,6 +61,11 @@ data class DetectedUiTargets(
     val visibleRawTitles: List<String> = emptyList(),
     val liveMultiplierBounds: Rect? = null,
     val stakeInputBounds: Rect? = null,
+    /** The "-" / "+" stepper buttons on either side of the stake box (BetPawa style). */
+    val stakeMinusBounds: Rect? = null,
+    val stakeMinusEnabled: Boolean = true,
+    val stakePlusBounds: Rect? = null,
+    val stakePlusEnabled: Boolean = true,
     val doubleButtonBounds: Rect? = null,
     val addButtonBounds: Rect? = null,
     val betButtonBounds: Rect? = null,
@@ -76,7 +81,9 @@ data class DetectedUiTargets(
     val foregroundPackage: String = "",
     val countdownRemainingMs: Long? = null,
     val isBetBtnEnabled: Boolean = true,
+    val isBetBtnClickable: Boolean = true,
     val isCashOutBtnEnabled: Boolean = true,
+    val isCashOutBtnClickable: Boolean = true,
     val isCancelBtnEnabled: Boolean = true,
     val isStakeInputEditable: Boolean = true,
     val autoCashOutToggleBounds: Rect? = null,
@@ -86,7 +93,10 @@ data class DetectedUiTargets(
     val detectedAutoCashOutValue: Double? = null,
     val conflictReasons: List<String> = emptyList(),
     val ocrVerified: Boolean = false,
-    val fusedConfidence: Float = 0f
+    val fusedConfidence: Float = 0f,
+    val canQueueBet: Boolean = false,
+    val autoCashOutTabBounds: Rect? = null,
+    val isAutoCashOutRowVisible: Boolean = false
 ) {
     val isStakeInputDetected: Boolean get() = stakeInputBounds != null
     val isDoubleBtnDetected: Boolean get() = doubleButtonBounds != null
@@ -167,6 +177,14 @@ data class DetectedUiTargets(
     }
 }
 
+/** A switch-like or editable control found while scanning; matched to its label by row geometry. */
+data class RowControl(
+    val bounds: Rect,
+    val checked: Boolean?,
+    val text: String,
+    val enabled: Boolean
+)
+
 data class HierarchyCandidate(
     val role: String,
     val resourceId: String,
@@ -207,6 +225,16 @@ open class AccessibilityController : AccessibilityService() {
         private const val MAX_TREE_DEPTH = 64
         private const val MAX_LOGGED_NODES = 600
         private const val MAX_SCAN_NODES = 1800
+        private const val MAX_PROBE_TAPS = 60
+
+        /** "Bet 400.00 TZS" / "Bet\n1.00 TZS" - the real BET button (name followed by an amount). */
+        private val BET_BUTTON_WITH_AMOUNT = Regex("^bet\\s*[0-9][0-9.,]*(\\s.*)?$", RegexOption.DOT_MATCHES_ALL)
+
+        /** A bare "Bet" label only counts as the button when at least this fraction of the screen wide (tabs are narrower). */
+        private const val BET_BUTTON_MIN_WIDTH_FRACTION = 0.35f
+
+        /** Max vertical distance (as a multiple of the label height) for a control to count as "on the same row". */
+        private const val SAME_ROW_TOLERANCE = 1.0f
 
         var controllerInstance: AccessibilityController? = null
             protected set
@@ -738,7 +766,7 @@ open class AccessibilityController : AccessibilityService() {
      * Resolves the best Accessibility root node across single-window OR split-screen/multi-window
      * modes (`AccessibilityService.windows`), skipping Screen Earner's own overlay windows.
      */
-    protected fun resolveBestTargetWindowRoot(): Pair<AccessibilityNodeInfo, Boolean>? {
+    protected open fun resolveBestTargetWindowRoot(): Pair<AccessibilityNodeInfo, Boolean>? {
         val ownPkg = runCatching { applicationContext?.packageName }.getOrNull().orEmpty()
         val activeRoot = safeRootInActiveWindow()
         val activePkg = activeRoot?.let { safeNodePackageName(it) }.orEmpty()
@@ -1160,11 +1188,14 @@ open class AccessibilityController : AccessibilityService() {
         var addBounds: Rect? = null
         var betBounds: Rect? = null
         var betEnabled = false
+        var betClickable = false
         var bestBetScore = -1
         var cancelBounds: Rect? = null
         var cancelEnabled = false
         var cashOutBounds: Rect? = null
         var cashOutEnabled = false
+        var cashOutClickable = false
+        var bestCashOutScore = -1
         var autoCashOutToggleBounds: Rect? = null
         var autoCashOutToggleChecked: Boolean? = null
         var autoCashOutInputBounds: Rect? = null
@@ -1176,6 +1207,18 @@ open class AccessibilityController : AccessibilityService() {
         val rootPackage = safeNodePackageName(rootNode)
         var scannedCount = 0
         var orderCounter = 0
+        var acoLabelBounds: Rect? = null
+        var autoTabBounds: Rect? = null
+        val toggleCandidates = mutableListOf<RowControl>()
+        val editableCandidates = mutableListOf<RowControl>()
+
+        data class ClickableAncestorInfo(
+            val rect: Rect,
+            val isEnabled: Boolean,
+            val isBetWrapperEligible: Boolean,
+            val isCashOutWrapperEligible: Boolean
+        )
+        val ancestorStack = mutableListOf<ClickableAncestorInfo>()
 
         fun traverse(node: AccessibilityNodeInfo, depth: Int, inHistoryAncestry: Boolean, inNonLiveMultiplierContainer: Boolean) {
             if (scannedCount >= MAX_SCAN_NODES || depth > MAX_TREE_DEPTH) return
@@ -1454,16 +1497,34 @@ open class AccessibilityController : AccessibilityService() {
 
             val isNodeEnabled = try { node.isEnabled } catch (_: Throwable) { true }
 
-            // 6. Detect CANCEL / BET QUEUED button ("Cancel" / "Cancel Bet")
-            if (cancelBounds == null && !isAddressBarNode && (
-                    lowerLabel == "cancel" ||
-                        lowerLabel == "cancel bet" ||
-                        lowerId.contains("cancel_bet") ||
-                        (lowerLabel.startsWith("cancel") && !lowerLabel.contains("auto"))
-                    )
+            val nodeRect = Rect().also { r -> try { node.getBoundsInScreen(r) } catch (_: Throwable) {} }
+            val containerSummary = if (
+                isClickable &&
+                node !== rootNode &&
+                !isEditableField &&
+                !isAddressBarNode &&
+                !nodeInHistoryContainer &&
+                !nodeInNonLiveMultiplierContainer &&
+                !isContainerTooLargeForButton(nodeRect, rootRect, className, isScrollable)
             ) {
-                val rect = Rect()
-                try { node.getBoundsInScreen(rect) } catch (_: Throwable) {}
+                collectButtonContainerSummary(node, rootRect)
+            } else null
+
+            // 6. Detect CANCEL / BET QUEUED button ("Cancel" / "Cancel Bet")
+            val cancelContainerLabel = containerSummary?.aggregatedLowerText.orEmpty()
+            val isCancelDirect = !isAddressBarNode && (
+                lowerLabel == "cancel" ||
+                    lowerLabel == "cancel bet" ||
+                    lowerId.contains("cancel_bet") ||
+                    (lowerLabel.startsWith("cancel") && !lowerLabel.contains("auto"))
+                )
+            val isCancelContainer = !isAddressBarNode && containerSummary != null && (
+                cancelContainerLabel == "cancel" ||
+                    cancelContainerLabel == "cancel bet" ||
+                    (cancelContainerLabel.startsWith("cancel") && !cancelContainerLabel.contains("auto"))
+                )
+            if (cancelBounds == null && (isCancelDirect || isCancelContainer)) {
+                val rect = nodeRect
                 if (!rect.isEmpty) {
                     cancelBounds = rect
                     cancelEnabled = isNodeEnabled
@@ -1471,8 +1532,10 @@ open class AccessibilityController : AccessibilityService() {
             }
 
             // 7. Detect BET / Place Bet button (strictly exclude 2x/Double, Cancel, Auto Cash Out, Cash Out)
+            // Supports both flat Button nodes and nested WebView containers (clickable parent wrapping smaller text child(ren)).
             val isExcludedBetNode = isAddressBarNode ||
                 nodeInNonLiveMultiplierContainer ||
+                isEditableField ||
                 lowerAllText.contains("betpawa") ||
                 lowerAllText.contains("sportybet") ||
                 lowerAllText.contains("all bets") ||
@@ -1490,41 +1553,158 @@ open class AccessibilityController : AccessibilityService() {
                 lowerLabel == "x2" ||
                 lowerLabel == "×2" ||
                 lowerLabel.contains("double")
-            if (!isExcludedBetNode) {
-                val betPriority = when {
-                    lowerLabel == "bet" || lowerLabel == "place bet" ||
-                        lowerLabel.startsWith("bet\n") || lowerLabel.matches(Regex("^bet\\s+\\d.*")) -> 3
+            if (!isExcludedBetNode && !nodeRect.isEmpty) {
+                val rootWidthPx = if (!rootRect.isEmpty) rootRect.width() else 0
+                val selfButtonEligible = isClickable && !isContainerTooLargeForButton(nodeRect, rootRect, className, isScrollable)
+                val enclosingAncestor = if (!selfButtonEligible) {
+                    ancestorStack.lastOrNull { it.isBetWrapperEligible }
+                } else null
+                val effectiveRect = when {
+                    selfButtonEligible -> nodeRect
+                    enclosingAncestor != null -> enclosingAncestor.rect
+                    else -> nodeRect
+                }
+                val effectiveEnabled = when {
+                    selfButtonEligible -> isNodeEnabled
+                    enclosingAncestor != null -> enclosingAncestor.isEnabled
+                    else -> isNodeEnabled
+                }
+                val effectiveClickable = selfButtonEligible || enclosingAncestor != null
+                val isWideLikeButton = rootWidthPx > 0 && effectiveRect.width() >= (rootWidthPx * BET_BUTTON_MIN_WIDTH_FRACTION)
+
+                val directPriority = when {
+                    BET_BUTTON_WITH_AMOUNT.matches(lowerLabel) -> 4
+                    lowerLabel == "place bet" -> 3
                     lowerId.contains("place_bet") || lowerId.contains("btn_bet") || lowerId.contains("bet_button") -> 2
-                    lowerLabel.contains("bet") -> 1
+                    lowerLabel == "bet" && effectiveClickable && isWideLikeButton -> 2
                     else -> 0
                 }
-                if (betPriority > bestBetScore) {
-                    val rect = Rect()
-                    try { node.getBoundsInScreen(rect) } catch (_: Throwable) {}
-                    if (!rect.isEmpty) {
-                        betBounds = rect
-                        betEnabled = isNodeEnabled
-                        bestBetScore = betPriority
+                val containerPriority = if (containerSummary != null && !containerSummary.hasExcludedBetTerms) {
+                    val agg = containerSummary.aggregatedLowerText
+                    when {
+                        BET_BUTTON_WITH_AMOUNT.matches(agg) -> 4
+                        agg == "place bet" -> 3
+                        agg == "bet" && isWideLikeButton -> 2
+                        else -> 0
+                    }
+                } else 0
+
+                val baseBetPriority = maxOf(directPriority, containerPriority)
+                if (baseBetPriority > 0) {
+                    val weightedScore = baseBetPriority * 10 + (if (effectiveClickable) 1 else 0)
+                    if (weightedScore > bestBetScore) {
+                        betBounds = Rect(effectiveRect)
+                        betEnabled = effectiveEnabled
+                        betClickable = effectiveClickable
+                        bestBetScore = weightedScore
                     }
                 }
             }
 
             // 8. Detect CASH OUT button ("Cash Out" / "Cashout", excluding Auto Cash Out controls & history)
-            if (cashOutBounds == null &&
-                !isAddressBarNode &&
-                !nodeInNonLiveMultiplierContainer &&
-                (lowerLabel.contains("cash out") || lowerLabel.contains("cashout") || lowerId.contains("cashout")) &&
-                !lowerLabel.contains("auto") &&
-                !lowerLabel.contains("history") &&
-                !lowerLabel.contains("cashback")
-            ) {
-                val rect = Rect()
-                try { node.getBoundsInScreen(rect) } catch (_: Throwable) {}
-                if (!rect.isEmpty) {
-                    cashOutBounds = rect
-                    cashOutEnabled = isNodeEnabled
+            val isExcludedCashOutNode = isAddressBarNode ||
+                nodeInNonLiveMultiplierContainer ||
+                isEditableField ||
+                lowerLabel.contains("auto") ||
+                lowerLabel.contains("history") ||
+                lowerLabel.contains("cashback")
+            if (!isExcludedCashOutNode && !nodeRect.isEmpty) {
+                val selfCashOutEligible = isClickable && !isContainerTooLargeForButton(nodeRect, rootRect, className, isScrollable)
+                val enclosingCashOutAncestor = if (!selfCashOutEligible) {
+                    ancestorStack.lastOrNull { it.isCashOutWrapperEligible }
+                } else null
+                val effectiveRect = when {
+                    selfCashOutEligible -> nodeRect
+                    enclosingCashOutAncestor != null -> enclosingCashOutAncestor.rect
+                    else -> nodeRect
+                }
+                val effectiveEnabled = when {
+                    selfCashOutEligible -> isNodeEnabled
+                    enclosingCashOutAncestor != null -> enclosingCashOutAncestor.isEnabled
+                    else -> isNodeEnabled
+                }
+                val effectiveClickable = selfCashOutEligible || enclosingCashOutAncestor != null
+
+                val directCashOutScore = when {
+                    (lowerLabel.contains("cash out") || lowerLabel.contains("cashout")) &&
+                        lowerLabel.any { it.isDigit() } -> 4
+                    lowerLabel == "cash out" || lowerLabel == "cashout" || lowerId.contains("cashout") -> 3
+                    lowerLabel.contains("cash out") || lowerLabel.contains("cashout") -> 2
+                    else -> 0
+                }
+                val containerCashOutScore = if (containerSummary != null && !containerSummary.hasExcludedCashOutTerms) {
+                    val agg = containerSummary.aggregatedLowerText
+                    when {
+                        (agg.contains("cash out") || agg.contains("cashout")) && agg.any { it.isDigit() } -> 4
+                        agg == "cash out" || agg == "cashout" -> 3
+                        agg.contains("cash out") || agg.contains("cashout") -> 2
+                        else -> 0
+                    }
+                } else 0
+                val baseCashOutPriority = maxOf(directCashOutScore, containerCashOutScore)
+                if (baseCashOutPriority > 0) {
+                    val weightedScore = baseCashOutPriority * 10 + (if (effectiveClickable) 1 else 0)
+                    if (weightedScore > bestCashOutScore) {
+                        cashOutBounds = Rect(effectiveRect)
+                        cashOutEnabled = effectiveEnabled
+                        cashOutClickable = effectiveClickable
+                        bestCashOutScore = weightedScore
+                    }
                 }
             }
+
+            // 9. Row-based collection for the game's own Auto Cash Out controls. In Aviator the words "Auto Cash Out"
+            // are a SEPARATE text node from the switch and the value box, so they are matched by geometry (same row,
+            // to the right of the label) after the traversal instead of by ancestor text.
+            if (!isAddressBarNode && combinedLabel.isNotBlank()) {
+                val rowRect = Rect()
+                try { node.getBoundsInScreen(rowRect) } catch (_: Throwable) {}
+                if (!rowRect.isEmpty) {
+                    val labelCompact = lowerLabel.replace("\n", " ").trim()
+                    if (acoLabelBounds == null && !isEditableField && (
+                            labelCompact.startsWith("auto cash") || labelCompact == "autocash" || labelCompact == "auto-cash out"
+                            ) && labelCompact.length <= 24
+                    ) {
+                        acoLabelBounds = rowRect
+                    }
+                    if (autoTabBounds == null && labelCompact == "auto" && isClickable &&
+                        (rootRect.isEmpty || rowRect.width() < rootRect.width() * 0.5f)
+                    ) {
+                        autoTabBounds = rowRect
+                    }
+                }
+            }
+            run {
+                val ctrlRect = Rect()
+                try { node.getBoundsInScreen(ctrlRect) } catch (_: Throwable) {}
+                if (!ctrlRect.isEmpty && !isAddressBarNode) {
+                    val enabledNow = try { node.isEnabled } catch (_: Throwable) { true }
+                    if (isEditableField) {
+                        editableCandidates += RowControl(ctrlRect, null, text.ifBlank { hint }, enabledNow)
+                    } else if (isCheckable || className.contains("Switch", true) || className.contains("CheckBox", true) ||
+                        (isClickable && (rootRect.isEmpty || ctrlRect.width() < rootRect.width() * 0.3f))
+                    ) {
+                        val checkedState: Boolean? = when {
+                            isCheckable -> isChecked
+                            (try { node.isSelected } catch (_: Throwable) { false }) -> true
+                            else -> null
+                        }
+                        toggleCandidates += RowControl(ctrlRect, checkedState, text.ifBlank { desc }, enabledNow)
+                    }
+                }
+            }
+
+            val pushedAncestor = if (containerSummary != null && !nodeRect.isEmpty) {
+                ancestorStack.add(
+                    ClickableAncestorInfo(
+                        rect = Rect(nodeRect),
+                        isEnabled = isNodeEnabled,
+                        isBetWrapperEligible = !isExcludedBetNode && !containerSummary.hasExcludedBetTerms,
+                        isCashOutWrapperEligible = !isExcludedCashOutNode && !containerSummary.hasExcludedCashOutTerms
+                    )
+                )
+                true
+            } else false
 
             val children = childNodesOf(node)
             for (child in children) {
@@ -1533,9 +1713,75 @@ open class AccessibilityController : AccessibilityService() {
                 }
                 safeRecycleNode(child, rootNode)
             }
+            if (pushedAncestor) {
+                ancestorStack.removeAt(ancestorStack.lastIndex)
+            }
         }
 
         traverse(rootNode, 0, inHistoryAncestry = false, inNonLiveMultiplierContainer = false)
+
+        // Match the Auto Cash Out switch + value box to the "Auto Cash Out" label by row geometry.
+        val acoLabel = acoLabelBounds
+        if (acoLabel != null) {
+            val rowTol = (acoLabel.height() * SAME_ROW_TOLERANCE).coerceAtLeast(24f)
+            fun sameRowRightOfLabel(r: Rect): Boolean =
+                abs((r.centerY() - acoLabel.centerY()).toFloat()) <= rowTol && r.left >= acoLabel.right - 8
+            // Row geometry wins over the ancestor-text heuristic (which can latch onto the label node itself).
+            toggleCandidates.filter { sameRowRightOfLabel(it.bounds) }.minByOrNull { it.bounds.left }?.let { tgl ->
+                autoCashOutToggleBounds = tgl.bounds
+                autoCashOutToggleChecked = tgl.checked ?: ScreenColorSampler.isSwitchOn(tgl.bounds)
+            }
+            editableCandidates.filter { sameRowRightOfLabel(it.bounds) }.minByOrNull { it.bounds.left }?.let { inp ->
+                autoCashOutInputBounds = inp.bounds
+                autoCashOutText = inp.text
+                autoCashOutValue = ScreenOcrAnalyzer.parseNumericAutoTargetToken(inp.text)
+            }
+        }
+        // Never let the Auto Cash Out value box (e.g. "2.00") be reported as the stake input.
+        val acoInputRect = autoCashOutInputBounds
+        if (acoInputRect != null && stakeBounds != null && Rect.intersects(stakeBounds!!, acoInputRect)) {
+            val betterStake = editableCandidates.firstOrNull { !Rect.intersects(it.bounds, acoInputRect) }
+            stakeBounds = betterStake?.bounds
+            stakeText = betterStake?.text
+            stakeEditable = betterStake?.enabled ?: true
+        }
+
+        // Stepper buttons: small clickable controls on the stake box's row, left ("-") and right ("+") of it.
+        var stakeMinus: RowControl? = null
+        var stakePlus: RowControl? = null
+        stakeBounds?.takeIf { !it.isEmpty }?.let { stk ->
+            val rootW = if (!rootRect.isEmpty) rootRect.width() else Int.MAX_VALUE
+            val excludedRects = listOfNotNull(
+                betBounds,
+                cancelBounds,
+                cashOutBounds,
+                doubleBounds,
+                autoCashOutToggleBounds,
+                autoTabBounds
+            )
+            val maxGap = (stk.height() * 3).coerceAtLeast(180)
+            val sameRow = toggleCandidates.filter { c ->
+                val labelLower = c.text?.trim()?.lowercase(Locale.US).orEmpty()
+                val isExcludedText = labelLower == "2x" || labelLower == "x2" || labelLower == "×2" ||
+                    labelLower == "bet" || labelLower == "auto" || labelLower.contains("cancel") ||
+                    labelLower.contains("cash") || labelLower.matches(Regex("^[0-9.,]+$"))
+                val collidesExcluded = excludedRects.any { ex -> !ex.isEmpty && Rect.intersects(c.bounds, ex) }
+                !isExcludedText &&
+                    !collidesExcluded &&
+                    c.checked == null &&
+                    c.bounds.width() < rootW * 0.25f &&
+                    c.bounds.height() <= (stk.height() * 2.2f).toInt().coerceAtLeast(120) &&
+                    abs(c.bounds.centerY() - stk.centerY()) <= (stk.height() * 0.8f).toInt().coerceAtLeast(20) &&
+                    !Rect.intersects(c.bounds, stk)
+            }
+            val slack = (stk.width() * 0.2f).toInt()
+            stakeMinus = sameRow
+                .filter { it.bounds.right <= stk.left + slack && (stk.left - it.bounds.right) <= maxGap }
+                .maxByOrNull { it.bounds.right }
+            stakePlus = sameRow
+                .filter { it.bounds.left >= stk.right - slack && (it.bounds.left - stk.right) <= maxGap }
+                .minByOrNull { it.bounds.left }
+        }
 
         val controlTops = listOfNotNull(
             betBounds?.takeIf { !it.isEmpty }?.top,
@@ -1572,23 +1818,30 @@ open class AccessibilityController : AccessibilityService() {
 
         val isCancelDetected = cancelBounds != null
         val waitingDetected = waitingNextRoundDetected || bettingOpenPromptDetected
+        // Phase comes from what the PLANE is doing, never from which button is visible: Aviator keeps an enabled
+        // "Bet" (or "Cancel") button on screen during flight so the player can queue the NEXT round.
+        val multiplierLive = liveCenterMultiplier != null && liveCenterMultiplier >= 1.00
+        val phase = when {
+            flewAwayDetected -> "CRASHED"
+            cashOutBounds != null && liveCenterMultiplier != null -> "IN_FLIGHT"
+            waitingDetected && !multiplierLive -> "BETTING_OPEN"
+            multiplierLive -> "IN_FLIGHT"
+            waitingDetected || isCancelDetected -> "BETTING_OPEN"
+            betBounds != null -> "BETTING_OPEN"
+            liveCenterMultiplier != null -> "IN_FLIGHT"
+            else -> "WAITING_FOR_GAME"
+        }
+        // True when a BET can be queued right now (button visible + clickable + enabled, nothing queued/cash-out showing).
+        val canQueueBet = betBounds != null && betClickable && betEnabled && cancelBounds == null && cashOutBounds == null
+
         val resolvedButtonState = when {
             flewAwayDetected -> SiteButtonState.CRASHED
             cashOutBounds != null -> SiteButtonState.CASH_OUT_AVAILABLE
             isCancelDetected -> SiteButtonState.BET_QUEUED
+            phase == "BETTING_OPEN" || waitingDetected -> SiteButtonState.IDLE_READY_TO_BET
+            betBounds != null && phase != "IN_FLIGHT" -> SiteButtonState.IDLE_READY_TO_BET
             betBounds != null -> SiteButtonState.IDLE_READY_TO_BET
-            waitingNextRoundDetected -> SiteButtonState.BET_QUEUED
             else -> SiteButtonState.UNKNOWN
-        }
-
-        val phase = when {
-            flewAwayDetected -> "CRASHED"
-            cashOutBounds != null && liveCenterMultiplier != null -> "IN_FLIGHT"
-            waitingDetected || isCancelDetected -> "BETTING_OPEN"
-            liveCenterMultiplier != null && liveCenterMultiplier > 1.00 && betBounds == null -> "IN_FLIGHT"
-            betBounds != null -> "BETTING_OPEN"
-            liveCenterMultiplier != null -> "IN_FLIGHT"
-            else -> "WAITING_FOR_GAME"
         }
 
         return DetectedUiTargets(
@@ -1615,6 +1868,10 @@ open class AccessibilityController : AccessibilityService() {
             cancelButtonBounds = cancelBounds,
             cashOutButtonBounds = cashOutBounds,
             detectedStakeText = stakeText,
+            stakeMinusBounds = stakeMinus?.bounds,
+            stakeMinusEnabled = stakeMinus?.enabled ?: true,
+            stakePlusBounds = stakePlus?.bounds,
+            stakePlusEnabled = stakePlus?.enabled ?: true,
             detectedBalance = detectedBalance,
             detectedCurrency = detectedCurrency,
             roundId = detectedRoundId,
@@ -1622,14 +1879,19 @@ open class AccessibilityController : AccessibilityService() {
             foregroundPackage = rootPackage,
             countdownRemainingMs = countdownRemainingMs,
             isBetBtnEnabled = betEnabled,
+            isBetBtnClickable = betClickable,
             isCashOutBtnEnabled = cashOutEnabled,
+            isCashOutBtnClickable = cashOutClickable,
             isCancelBtnEnabled = cancelEnabled,
             isStakeInputEditable = stakeEditable,
             autoCashOutToggleBounds = autoCashOutToggleBounds,
             isAutoCashOutToggleChecked = autoCashOutToggleChecked,
             autoCashOutInputBounds = autoCashOutInputBounds,
             detectedAutoCashOutText = autoCashOutText,
-            detectedAutoCashOutValue = autoCashOutValue
+            detectedAutoCashOutValue = autoCashOutValue,
+            canQueueBet = canQueueBet,
+            autoCashOutTabBounds = autoTabBounds,
+            isAutoCashOutRowVisible = acoLabelBounds != null
         )
     }
 
@@ -1699,12 +1961,20 @@ open class AccessibilityController : AccessibilityService() {
         formatted: String,
         rootNode: AccessibilityNodeInfo
     ): Boolean {
+        val originalBounds = Rect().also { runCatching { stakeNode.getBoundsInScreen(it) } }
         fun readBackStake(): String? {
             runCatching { stakeNode.refresh() }
             val direct = runCatching { stakeNode.text?.toString() }.getOrNull()
             if (!direct.isNullOrBlank()) return direct
             runCatching { rootNode.refresh() }
-            return runCatching { findEditableStakeNode(rootNode, rootNode)?.text?.toString() }.getOrNull()
+            // Re-find THIS field by its bounds - never fall back to "the first numeric field", which could be
+            // a different control (stake vs Auto Cash Out value).
+            if (originalBounds.isEmpty) return null
+            return runCatching {
+                findNodeAtBounds(rootNode, originalBounds) { n ->
+                    n.isEditable || n.className?.toString()?.contains("EditText", true) == true
+                }?.text?.toString()
+            }.getOrNull()
         }
 
         // Attempt 1: Focus, explicitly clear existing value if present, and set new stake via ACTION_SET_TEXT
@@ -1760,6 +2030,42 @@ open class AccessibilityController : AccessibilityService() {
         return false
     }
 
+    /**
+     * Waits until the game layout stops moving (keyboard closed, bounds identical on two consecutive scans),
+     * then calls [onDone] with true. Calls it with false if the layout is still moving after [timeoutMs].
+     * Stake editing opens the keyboard and scrolls the page, so the BET button moves; taps must use settled bounds.
+     * Results are delivered on the main looper.
+     */
+    fun awaitStableBetLayout(timeoutMs: Long = 1500L, pollMs: Long = 120L, onDone: (Boolean) -> Unit) {
+        val startedAt = System.currentTimeMillis()
+        var lastSignature: String? = null
+        val poll = object : Runnable {
+            override fun run() {
+                try {
+                    val targets = refreshLiveTargetsNow()
+                    val keyboardOpen = isSoftKeyboardOpen()
+                    val signature = targets?.let {
+                        "${it.betButtonBounds}|${it.cashOutButtonBounds}|${it.cancelButtonBounds}|${it.stakeInputBounds}"
+                    }
+                    if (!keyboardOpen && signature != null && signature == lastSignature) {
+                        onDone(true)
+                        return
+                    }
+                    lastSignature = signature
+                    if (System.currentTimeMillis() - startedAt >= timeoutMs) {
+                        onDone(false)
+                        return
+                    }
+                    mainHandler.postDelayed(this, pollMs)
+                } catch (t: Throwable) {
+                    safeLogE(TAG, "awaitStableBetLayout failed", t)
+                    onDone(false)
+                }
+            }
+        }
+        mainHandler.postDelayed(poll, pollMs)
+    }
+
     fun refreshLiveTargetsNow(): DetectedUiTargets? {
         val pair = resolveBestTargetWindowRoot() ?: return null
         val (rootNode, fromWindowsList) = pair
@@ -1813,7 +2119,9 @@ open class AccessibilityController : AccessibilityService() {
 
             val (rootNode, fromWindowsList) = pair
             try {
-                val stakeNode = findEditableStakeNode(rootNode, rootNode)
+                // Keep the Auto Cash Out value box ("2.00") out of the running for the stake field.
+                val acoExclusion = runCatching { scanWindowTargets(rootNode).autoCashOutInputBounds }.getOrNull()
+                val stakeNode = findEditableStakeNode(rootNode, rootNode, excludeBounds = acoExclusion)
                 if (stakeNode == null) {
                     safeLogW(TAG, "applyStakeToTargetApp aborted: editable stake input node not found")
                     onComplete?.invoke(false)
@@ -1850,74 +2158,474 @@ open class AccessibilityController : AccessibilityService() {
     }
 
     /**
-     * Configures the game's built-in Auto Cash Out toggle and multiplier target and verifies both read back accurately.
+     * Makes sure the GAME's own Auto Cash Out is armed at [targetMultiplier], the way a person would:
+     *  1. If the "Auto Cash Out" row is not on screen, tap the game's "Auto" tab first (the row only exists there).
+     *  2. Read the switch + value box by row geometry (see scanWindowTargets).
+     *  3. If the value already equals the target and the switch is on (or its state cannot be read), touch nothing.
+     *  4. If the switch is verifiably OFF, turn it on and read it back. If that cannot be verified, STOP and leave
+     *     the value box untouched - the value box is only ever edited after the switch is verified ON.
+     *  5. Edit the value box only when it differs from the target, then verify by read-back.
+     * A switch whose state cannot be read at all (plain web div, no screen-color capture) is never toggled blindly.
      */
     fun configureGameAutoCashOut(
         enabled: Boolean,
         targetMultiplier: Double,
+        mode: String = "ENSURE",
         onComplete: ((Boolean, String?) -> Unit)? = null
     ) {
+        if (mode == "OFF") {
+            onComplete?.invoke(true, null)
+            return
+        }
         try {
-            val pair = resolveBestTargetWindowRoot()
-            if (pair == null) {
-                onComplete?.invoke(false, "Game window unavailable for Auto Cash Out verification.")
-                return
-            }
-            val (rootNode, fromWindowsList) = pair
-            try {
-                val toggleNode = findAutoCashOutToggleNode(rootNode)
-                if (toggleNode == null) {
-                    onComplete?.invoke(false, "Game Auto Cash Out toggle control not found.")
-                    return
-                }
-                val currentlyChecked = runCatching { toggleNode.isChecked }.getOrDefault(false)
-                if (currentlyChecked != enabled) {
-                    val toggled = runCatching { toggleNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
-                    runCatching { toggleNode.refresh() }
-                    val nowChecked = runCatching { toggleNode.isChecked }.getOrDefault(!currentlyChecked)
-                    if (!toggled && nowChecked != enabled) {
-                        safeRecycleNode(toggleNode, rootNode)
-                        onComplete?.invoke(false, "Failed to switch game Auto Cash Out to ${if (enabled) "ON" else "OFF"}.")
-                        return
-                    }
-                }
-                safeRecycleNode(toggleNode, rootNode)
-
-                if (!enabled) {
-                    refreshLiveTargetsNow()
-                    onComplete?.invoke(true, null)
-                    return
-                }
-
-                val targetNode = findEditableAutoCashOutNode(rootNode, rootNode)
-                if (targetNode == null) {
-                    onComplete?.invoke(false, "Game Auto Cash Out multiplier input not found.")
-                    return
-                }
-                val formattedTarget = String.format(Locale.US, "%.2f", targetMultiplier.coerceAtLeast(1.01))
-                val currentText = runCatching { targetNode.text?.toString().orEmpty() }.getOrDefault("")
-                val alreadyMatches = verifyStakeAccepted(currentText, targetMultiplier)
-                val targetAccepted = if (alreadyMatches) {
-                    true
-                } else {
-                    writeAndVerifyStakeNode(targetNode, targetMultiplier, formattedTarget, rootNode)
-                }
-                safeRecycleNode(targetNode, rootNode)
-
-                if (!targetAccepted) {
-                    onComplete?.invoke(false, "Game Auto Cash Out target mismatch (could not verify ${formattedTarget}x).")
-                    return
-                }
-                refreshLiveTargetsNow()
-                onComplete?.invoke(true, null)
-            } finally {
-                if (fromWindowsList) {
-                    safeRecycleRoot(rootNode)
-                }
-            }
+            attemptConfigureAutoCashOut(enabled, targetMultiplier, mode, 0, onComplete)
         } catch (t: Throwable) {
             safeLogE(TAG, "configureGameAutoCashOut failed", t)
             onComplete?.invoke(false, t.message ?: "Auto Cash Out configuration error")
+        }
+    }
+
+    private fun resolveAutoCashSwitchState(targets: DetectedUiTargets): Boolean? =
+        targets.isAutoCashOutToggleChecked ?: ScreenColorSampler.isSwitchOn(targets.autoCashOutToggleBounds)
+
+    /**
+     * Finds the site's MINIMUM stake the way a person would: press the "-" button via dispatchTouchGesture
+     * until the stake stops going down (or the button turns disabled). Returns the floor, or null if it
+     * could not be established (button missing, stake unreadable, tap failed, bet active, or still falling
+     * after [MAX_PROBE_TAPS] taps). Call only between rounds with no bet placed.
+     */
+    fun probeMinStake(onComplete: (Double?) -> Unit) {
+        try {
+            stepMinStakeProbe(0, null, onComplete)
+        } catch (t: Throwable) {
+            safeLogE(TAG, "probeMinStake failed", t)
+            onComplete(null)
+        }
+    }
+
+    private fun parseStakeNumber(raw: String?): Double? =
+        raw?.replace(",", "")?.let { Regex("[0-9]+(?:[.][0-9]+)?").find(it) }?.value?.toDoubleOrNull()
+
+    private fun stepMinStakeProbe(tap: Int, last: Double?, onComplete: (Double?) -> Unit) {
+        val pair = resolveBestTargetWindowRoot()
+        if (pair == null) {
+            onComplete(null)
+            return
+        }
+        val (root, recycle) = pair
+        try {
+            val scan = scanWindowTargets(root)
+            if (scan.isCancelBtnDetected || scan.cashOutButtonBounds != null) {
+                onComplete(null)
+                return
+            }
+            val current = parseStakeNumber(scan.detectedStakeText)
+            val minus = scan.stakeMinusBounds
+            if (current == null || minus == null || minus.isEmpty) {
+                onComplete(null)
+                return
+            }
+            val atFloor = !scan.stakeMinusEnabled || (last != null && current >= last - 1e-9)
+            if (atFloor) {
+                onComplete(current)
+                return
+            }
+            if (tap >= MAX_PROBE_TAPS) {
+                onComplete(null)
+                return
+            }
+            dispatchTouchGestureWithDebounce(
+                x = minus.centerX().toFloat(),
+                y = minus.centerY().toFloat(),
+                minDebounceMs = 0L
+            ) { tapped ->
+                if (!tapped) {
+                    onComplete(null)
+                    return@dispatchTouchGestureWithDebounce
+                }
+                mainHandler.postDelayed({ stepMinStakeProbe(tap + 1, current, onComplete) }, 140L)
+            }
+        } catch (t: Throwable) {
+            safeLogE(TAG, "stepMinStakeProbe failed", t)
+            onComplete(null)
+        } finally {
+            if (recycle) safeRecycleRoot(root)
+        }
+    }
+
+    private data class ButtonContainerSummary(
+        val aggregatedLowerText: String,
+        val hasExcludedBetTerms: Boolean,
+        val hasExcludedCashOutTerms: Boolean
+    )
+
+    private fun isContainerTooLargeForButton(
+        rect: Rect,
+        rootRect: Rect,
+        className: String,
+        isScrollable: Boolean
+    ): Boolean {
+        if (rect.isEmpty) return true
+        if (isScrollable || className.contains("WebView", ignoreCase = true) || className.contains("ScrollView", ignoreCase = true)) {
+            return true
+        }
+        if (!rootRect.isEmpty && rootRect.width() > 0 && rootRect.height() > 0) {
+            if (rect == rootRect) return true
+            if (rect.width() >= (rootRect.width() * 0.96f) && rect.height() >= (rootRect.height() * 0.40f)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun collectButtonContainerSummary(
+        container: AccessibilityNodeInfo,
+        rootRect: Rect
+    ): ButtonContainerSummary? {
+        val parts = mutableListOf<String>()
+        var clickableDescendants = 0
+        var hasEditableDescendant = false
+        var visited = 0
+
+        fun collect(n: AccessibilityNodeInfo, depth: Int) {
+            if (visited >= 24 || depth > 4 || hasEditableDescendant || clickableDescendants >= 2) return
+            visited++
+            val cls = runCatching { n.className?.toString().orEmpty() }.getOrDefault("")
+            val viewId = runCatching { n.viewIdResourceName?.trim()?.lowercase(Locale.US).orEmpty() }.getOrDefault("")
+            val isAddressBar = viewId.contains("url_bar") || viewId.contains("omnibox") || viewId.contains("location_bar")
+            if (isAddressBar) {
+                hasEditableDescendant = true
+                return
+            }
+            if (depth > 0) {
+                val editable = runCatching { n.isEditable }.getOrDefault(false) || cls.contains("EditText", ignoreCase = true)
+                if (editable) {
+                    hasEditableDescendant = true
+                    return
+                }
+                if (runCatching { n.isClickable }.getOrDefault(false)) {
+                    clickableDescendants++
+                    if (clickableDescendants >= 2) return
+                }
+            }
+            val text = runCatching { n.text?.toString()?.trim().orEmpty() }.getOrDefault("")
+            val desc = runCatching { n.contentDescription?.toString()?.trim().orEmpty() }.getOrDefault("")
+            val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                runCatching { n.hintText?.toString()?.trim().orEmpty() }.getOrDefault("")
+            } else ""
+            val piece = listOf(text, desc, hint).firstOrNull { it.isNotBlank() }
+            if (!piece.isNullOrBlank()) {
+                parts += piece
+            }
+            for (child in childNodesOf(n)) {
+                collect(child, depth + 1)
+                safeRecycleNode(child, container)
+            }
+        }
+
+        collect(container, 0)
+        if (hasEditableDescendant || clickableDescendants >= 2 || parts.isEmpty()) return null
+        val aggregated = parts.joinToString(" ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .lowercase(Locale.US)
+        if (aggregated.isBlank()) return null
+
+        val hasExcludedBetTerms = aggregated.contains("betpawa") ||
+            aggregated.contains("sportybet") ||
+            aggregated.contains("all bets") ||
+            aggregated.contains("my bets") ||
+            aggregated.contains("top bets") ||
+            aggregated.contains("bet history") ||
+            aggregated.contains("betslip") ||
+            aggregated.contains("cancel") ||
+            aggregated.contains("history") ||
+            aggregated.contains("waiting") ||
+            aggregated.contains("cash") ||
+            aggregated.contains("auto") ||
+            aggregated.contains("place your bet") ||
+            aggregated == "2x" ||
+            aggregated == "x2" ||
+            aggregated == "×2" ||
+            aggregated.contains("double")
+
+        val hasExcludedCashOutTerms = aggregated.contains("auto") ||
+            aggregated.contains("history") ||
+            aggregated.contains("cashback")
+
+        return ButtonContainerSummary(
+            aggregatedLowerText = aggregated,
+            hasExcludedBetTerms = hasExcludedBetTerms,
+            hasExcludedCashOutTerms = hasExcludedCashOutTerms
+        )
+    }
+
+    /** Finds a node whose screen bounds equal [target] and that satisfies [accept]. */
+    private fun findNodeAtBounds(
+        node: AccessibilityNodeInfo,
+        target: Rect,
+        depth: Int = 0,
+        visited: IntArray = intArrayOf(0),
+        accept: (AccessibilityNodeInfo) -> Boolean
+    ): AccessibilityNodeInfo? {
+        if (depth > MAX_TREE_DEPTH || visited[0] >= MAX_SCAN_NODES) return null
+        visited[0]++
+        val r = Rect()
+        runCatching { node.getBoundsInScreen(r) }
+        if (r == target && runCatching { accept(node) }.getOrDefault(false)) return node
+        for (child in childNodesOf(node)) {
+            val found = findNodeAtBounds(child, target, depth + 1, visited, accept)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    private fun isExcludedClickableButtonCandidate(
+        node: AccessibilityNodeInfo,
+        nodeRect: Rect,
+        rootRect: Rect,
+        isCashOut: Boolean
+    ): Boolean {
+        val text = runCatching { node.text?.toString()?.trim()?.lowercase(Locale.US).orEmpty() }.getOrDefault("")
+        val desc = runCatching { node.contentDescription?.toString()?.trim()?.lowercase(Locale.US).orEmpty() }.getOrDefault("")
+        val viewId = runCatching { node.viewIdResourceName?.trim()?.lowercase(Locale.US).orEmpty() }.getOrDefault("")
+        val cls = runCatching { node.className?.toString().orEmpty() }.getOrDefault("")
+        val isEditable = runCatching { node.isEditable }.getOrDefault(false) || cls.contains("EditText", ignoreCase = true)
+        val isScrollable = runCatching { node.isScrollable }.getOrDefault(false)
+        if (isEditable || isContainerTooLargeForButton(nodeRect, rootRect, cls, isScrollable)) return true
+        val combined = "$text $desc $viewId"
+        if (viewId.contains("url_bar") || viewId.contains("omnibox") || viewId.contains("location_bar")) return true
+        if (combined.contains("auto") || combined.contains("history") || combined.contains("betpawa") || combined.contains("sportybet")) {
+            return true
+        }
+        if (isCashOut) {
+            if (text == "2x" || text == "x2" || text == "×2" || combined.contains("cashback")) return true
+        } else {
+            if (text == "2x" || text == "x2" || text == "×2" || combined.contains("double") ||
+                combined.contains("cancel") || combined.contains("cash") || combined.contains("all bets") || combined.contains("my bets")
+            ) {
+                return true
+            }
+            val rootWidth = if (!rootRect.isEmpty) rootRect.width() else 0
+            if (text == "bet" && rootWidth > 0 && nodeRect.width() < (rootWidth * BET_BUTTON_MIN_WIDTH_FRACTION)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Resolves a verified clickable+enabled node (and its real bounds) backing [targetBounds]:
+     *  1. Exact bounds match (`r == targetBounds`).
+     *  2. Smallest valid enclosing clickable parent wrapping a smaller child text label (`r.contains(targetBounds)`).
+     *  3. Largest valid clickable child contained inside [targetBounds] (`targetBounds.contains(r)`).
+     * Returns null when no clickable+enabled node exists (preventing blind taps on inert text labels).
+     */
+    private fun findClickableButtonBounds(
+        rootNode: AccessibilityNodeInfo,
+        targetBounds: Rect,
+        isCashOut: Boolean
+    ): Rect? {
+        if (targetBounds.isEmpty) return null
+        val rootRect = Rect().also { runCatching { rootNode.getBoundsInScreen(it) } }
+        var exactMatch: Rect? = null
+        var bestEnclosing: Rect? = null
+        var bestEnclosingArea = Long.MAX_VALUE
+        var bestContained: Rect? = null
+        var bestContainedArea = -1L
+        var visited = 0
+
+        fun visit(node: AccessibilityNodeInfo, depth: Int) {
+            if (exactMatch != null || depth > MAX_TREE_DEPTH || visited >= MAX_SCAN_NODES) return
+            visited++
+            val clickable = runCatching { node.isClickable }.getOrDefault(false)
+            val enabled = runCatching { node.isEnabled }.getOrDefault(false)
+            val r = Rect().also { runCatching { node.getBoundsInScreen(it) } }
+
+            if (node !== rootNode && clickable && enabled && !r.isEmpty &&
+                !isExcludedClickableButtonCandidate(node, r, rootRect, isCashOut)
+            ) {
+                val summary = collectButtonContainerSummary(node, rootRect)
+                val summaryValid = summary == null || (if (isCashOut) !summary.hasExcludedCashOutTerms else !summary.hasExcludedBetTerms)
+                if (summaryValid) {
+                    val area = r.width().toLong() * r.height().toLong()
+                    when {
+                        r == targetBounds -> {
+                            exactMatch = Rect(r)
+                            return
+                        }
+                        r.contains(targetBounds) && area < bestEnclosingArea -> {
+                            bestEnclosing = Rect(r)
+                            bestEnclosingArea = area
+                        }
+                        targetBounds.contains(r) && area > bestContainedArea -> {
+                            bestContained = Rect(r)
+                            bestContainedArea = area
+                        }
+                    }
+                }
+            }
+
+            for (child in childNodesOf(node)) {
+                visit(child, depth + 1)
+                safeRecycleNode(child, rootNode)
+            }
+        }
+
+        visit(rootNode, 0)
+        return exactMatch ?: bestEnclosing ?: bestContained
+    }
+
+    private fun tapBoundsWithGesture(
+        bounds: Rect,
+        onTapped: (Boolean) -> Unit
+    ) {
+        if (bounds.isEmpty) {
+            onTapped(false)
+            return
+        }
+        dispatchTouchGesture(bounds.centerX().toFloat(), bounds.centerY().toFloat()) { ok -> onTapped(ok) }
+    }
+
+    private fun attemptConfigureAutoCashOut(
+        enabled: Boolean,
+        targetMultiplier: Double,
+        mode: String,
+        attempt: Int,
+        onComplete: ((Boolean, String?) -> Unit)?
+    ) {
+        val pair = resolveBestTargetWindowRoot()
+        if (pair == null) {
+            onComplete?.invoke(false, "Game window unavailable for Auto Cash Out verification.")
+            return
+        }
+        val (rootNode, fromWindowsList) = pair
+        var handedOff = false
+        try {
+            val scan = scanWindowTargets(rootNode)
+            val target = targetMultiplier.coerceAtLeast(1.01)
+
+            // 1. Open the Auto tab when the Auto Cash Out row is not visible.
+            if (!scan.isAutoCashOutRowVisible || scan.autoCashOutToggleBounds == null) {
+                val tab = scan.autoCashOutTabBounds
+                if (attempt < 3 && (tab != null || attempt > 0)) {
+                    handedOff = true
+                    val proceed = Runnable { attemptConfigureAutoCashOut(enabled, targetMultiplier, mode, attempt + 1, onComplete) }
+                    if (attempt == 0 && tab != null) {
+                        tapBoundsWithGesture(tab) { mainHandler.postDelayed(proceed, 380L) }
+                    } else {
+                        mainHandler.postDelayed(proceed, 300L)
+                    }
+                    return
+                }
+                onComplete?.invoke(
+                    false,
+                    if (tab == null) "Game Auto Cash Out row not found (no Auto tab or switch visible)."
+                    else "Game Auto Cash Out row did not open after tapping the Auto tab."
+                )
+                return
+            }
+
+            val toggleBounds = scan.autoCashOutToggleBounds
+            val inputBounds = scan.autoCashOutInputBounds
+            val currentValue = scan.detectedAutoCashOutValue
+                ?: scan.detectedAutoCashOutText?.let { ScreenOcrAnalyzer.parseNumericAutoTargetToken(it) }
+            val valueMatches = currentValue != null && abs(currentValue - target) < 0.005
+            val switchState = resolveAutoCashSwitchState(scan)
+
+            // Turning the game's Auto Cash Out OFF.
+            if (!enabled) {
+                if (switchState != true) {
+                    onComplete?.invoke(true, null)
+                    return
+                }
+                handedOff = true
+                tapBoundsWithGesture(toggleBounds) {
+                    mainHandler.postDelayed({
+                        val after = refreshLiveTargetsNow()
+                        val stillOn = after?.let { resolveAutoCashSwitchState(it) } == true
+                        onComplete?.invoke(!stillOn, if (stillOn) "Game Auto Cash Out did not switch OFF." else null)
+                    }, 320L)
+                }
+                return
+            }
+
+            // 3. Already armed by the user at the right value: leave it alone.
+            if (valueMatches && (switchState == true || (mode != "ENSURE" && switchState != false) || switchState == null)) {
+                refreshLiveTargetsNow()
+                onComplete?.invoke(true, null)
+                return
+            }
+
+            // Switch state cannot be read and the value differs: never guess (a blind tap could turn it OFF).
+            if (switchState == null) {
+                onComplete?.invoke(
+                    false,
+                    "Cannot read the Auto Cash Out switch state (turn on screen-color capture, or set it by hand). " +
+                        "Multiplier box left untouched."
+                )
+                return
+            }
+
+            fun editValueThenFinish(root: AccessibilityNodeInfo, inputRect: Rect?) {
+                if (inputRect == null) {
+                    onComplete?.invoke(false, "Game Auto Cash Out multiplier input not found.")
+                    return
+                }
+                val inputNode = findNodeAtBounds(root, inputRect) { n -> n.isEditable || n.className?.toString()?.contains("EditText", true) == true }
+                if (inputNode == null) {
+                    onComplete?.invoke(false, "Game Auto Cash Out multiplier input is not editable.")
+                    return
+                }
+                val formatted = String.format(Locale.US, "%.2f", target)
+                val ok = writeAndVerifyStakeNode(inputNode, target, formatted, root)
+                refreshLiveTargetsNow()
+                onComplete?.invoke(ok, if (ok) null else "Game Auto Cash Out target mismatch (could not verify ${formatted}x).")
+            }
+
+            if (switchState == true) {
+                // 5. Switch already on, only the value differs.
+                editValueThenFinish(rootNode, inputBounds)
+                return
+            }
+
+            // 4. Switch verifiably OFF: turn it on and read it back before touching the value box.
+            handedOff = true
+            tapBoundsWithGesture(toggleBounds) { _ ->
+                mainHandler.postDelayed({
+                    val pair2 = resolveBestTargetWindowRoot()
+                    if (pair2 == null) {
+                        onComplete?.invoke(false, "Game window lost while enabling Auto Cash Out.")
+                        return@postDelayed
+                    }
+                    val (root2, recycle2) = pair2
+                    try {
+                        val scan2 = scanWindowTargets(root2)
+                        if (resolveAutoCashSwitchState(scan2) != true) {
+                            onComplete?.invoke(false, "Failed to switch game Auto Cash Out ON. Multiplier box left untouched.")
+                            return@postDelayed
+                        }
+                        val v2 = scan2.detectedAutoCashOutValue
+                            ?: scan2.detectedAutoCashOutText?.let { ScreenOcrAnalyzer.parseNumericAutoTargetToken(it) }
+                        if (v2 != null && abs(v2 - target) < 0.005) {
+                            refreshLiveTargetsNow()
+                            onComplete?.invoke(true, null)
+                        } else {
+                            editValueThenFinish(root2, scan2.autoCashOutInputBounds)
+                        }
+                    } finally {
+                        if (recycle2) safeRecycleRoot(root2)
+                    }
+                }, 320L)
+            }
+        } catch (t: Throwable) {
+            safeLogE(TAG, "attemptConfigureAutoCashOut failed", t)
+            onComplete?.invoke(false, t.message ?: "Auto Cash Out configuration error")
+        } finally {
+            // Roots handed to a delayed continuation are not recycled here; they are never reused after hand-off.
+            if (!handedOff && fromWindowsList) {
+                safeRecycleRoot(rootNode)
+            }
         }
     }
 
@@ -1956,8 +2664,9 @@ open class AccessibilityController : AccessibilityService() {
 
     /**
      * Clicks the BET button ONLY after freshly re-scanning the live screen, confirming button identity,
-     * enabled state, phase (BETTING_OPEN / IDLE_READY_TO_BET), and zero collision with 2x/Cancel/CashOut/AutoCashOut.
-     * NEVER uses stale fallback coordinates.
+     * a verified clickable+enabled node (or enclosing clickable parent), enabled state, phase
+     * (BETTING_OPEN / IDLE_READY_TO_BET), and zero collision with 2x/Cancel/CashOut/AutoCashOut.
+     * NEVER falls back to tapping inert unclickable text bounds or stale coordinates.
      */
     fun clickBetTarget(
         fallbackX: Float? = null,
@@ -1972,10 +2681,10 @@ open class AccessibilityController : AccessibilityService() {
                 return
             }
             val (root, shouldRecycle) = pair
-            var betClickedViaNode = false
-            var betBounds: Rect? = null
+            var verifiedClickBounds: Rect? = null
             var collisionError: String? = null
             var betEnabled = false
+            var betClickable = false
             var siteState = SiteButtonState.UNKNOWN
             try {
                 val rawTargets = scanWindowTargets(root)
@@ -1990,48 +2699,49 @@ open class AccessibilityController : AccessibilityService() {
                 _detectedTargets.value = targets
                 siteState = targets.siteButtonState
                 betEnabled = targets.isBetBtnEnabled
+                betClickable = targets.isBetBtnClickable
                 collisionError = targets.detectBetCollisionReason()
                     ?: fused.conflictReasons.firstOrNull()?.takeIf { fused.hasConflict }
                 if (collisionError == null && targets.isBetBtnDetected && targets.isBetBtnEnabled &&
+                    targets.isBetBtnClickable &&
                     targets.siteButtonState == SiteButtonState.IDLE_READY_TO_BET &&
                     !fused.hasConflict
                 ) {
-                    betBounds = targets.betButtonBounds
-                    val betNode = findInteractiveButtonNode(
-                        node = root,
-                        keywords = listOf("bet", "place bet", "wager"),
-                        excludedTerms = listOf(
-                            "betpawa", "sportybet", "all bets", "my bets", "top bets",
-                            "bet history", "betslip", "cancel", "auto", "waiting",
-                            "2x", "x2", "double", "cash out", "cashout"
-                        )
-                    )
-                    if (betNode != null && runCatching { betNode.isClickable && betNode.isEnabled }.getOrDefault(false)) {
-                        val nodeRect = Rect().also { runCatching { betNode.getBoundsInScreen(it) } }
-                        if (!nodeRect.isEmpty && betBounds != null && isBoundsSafelyContained(nodeRect, betBounds)) {
-                            betClickedViaNode = runCatching { betNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
-                        } else if (!nodeRect.isEmpty) {
-                            safeLogW(TAG, "clickBetTarget: matching node bounds rejected due to containment mismatch: nodeRect=$nodeRect target=$betBounds")
-                        }
-                    }
+                    val scannedBounds = targets.betButtonBounds?.takeIf { !it.isEmpty }
+                    verifiedClickBounds = scannedBounds?.let { findClickableButtonBounds(root, it, isCashOut = false) }
                 }
             } finally {
                 if (shouldRecycle) safeRecycleRoot(root)
             }
 
-            if (collisionError != null || !betEnabled || siteState != SiteButtonState.IDLE_READY_TO_BET) {
-                safeLogW(TAG, "clickBetTarget blocked by live validation: state=$siteState enabled=$betEnabled reason=$collisionError")
+            if (collisionError != null || !betEnabled || !betClickable ||
+                siteState != SiteButtonState.IDLE_READY_TO_BET || verifiedClickBounds == null || verifiedClickBounds.isEmpty
+            ) {
+                safeLogW(TAG, "clickBetTarget blocked by live validation: state=$siteState enabled=$betEnabled clickable=$betClickable clickBounds=$verifiedClickBounds reason=$collisionError")
                 onComplete?.invoke(false)
                 return
             }
-            if (betClickedViaNode) {
-                onComplete?.invoke(true)
+            val settledBounds = awaitStableLayout()?.takeIf { !it.isEmpty }
+            if (settledBounds == null) {
+                safeLogW(TAG, "clickBetTarget aborted: settled clickable BET bounds unavailable")
+                onComplete?.invoke(false)
                 return
             }
-            if (betBounds != null && !betBounds.isEmpty) {
-                dispatchTouchGesture(betBounds.centerX().toFloat(), betBounds.centerY().toFloat(), onComplete)
+            // Re-verify clickable+enabled node on settled root immediately before touch dispatch
+            val settledPair = resolveBestTargetWindowRoot()
+            var finalClickBounds: Rect? = null
+            if (settledPair != null) {
+                val (sRoot, sRecycle) = settledPair
+                try {
+                    finalClickBounds = findClickableButtonBounds(sRoot, settledBounds, isCashOut = false)
+                } finally {
+                    if (sRecycle) safeRecycleRoot(sRoot)
+                }
+            }
+            if (finalClickBounds != null && !finalClickBounds.isEmpty) {
+                dispatchTouchGesture(finalClickBounds.centerX().toFloat(), finalClickBounds.centerY().toFloat(), onComplete)
             } else {
-                safeLogW(TAG, "clickBetTarget aborted: verified BET bounds unavailable")
+                safeLogW(TAG, "clickBetTarget aborted: clickable BET node missing after layout settle")
                 onComplete?.invoke(false)
             }
         } catch (t: Throwable) {
@@ -2042,7 +2752,8 @@ open class AccessibilityController : AccessibilityService() {
 
     /**
      * Clicks CASH OUT ONLY after freshly re-scanning the live screen and confirming Cash Out availability,
-     * enabled state, and zero control collision. Never falls back to stale coordinates.
+     * a verified clickable+enabled node (or enclosing clickable parent), and zero control collision.
+     * Uses stable clickable bounds with dispatchTouchGesture only.
      */
     fun clickCashOutTarget(
         fallbackX: Float? = null,
@@ -2057,10 +2768,10 @@ open class AccessibilityController : AccessibilityService() {
                 return
             }
             val (root, shouldRecycle) = pair
-            var cashOutClickedViaNode = false
-            var cashOutBounds: Rect? = null
+            var verifiedClickBounds: Rect? = null
             var collisionError: String? = null
             var cashOutEnabled = false
+            var cashOutClickable = false
             var siteState = SiteButtonState.UNKNOWN
             try {
                 val rawTargets = scanWindowTargets(root)
@@ -2075,50 +2786,134 @@ open class AccessibilityController : AccessibilityService() {
                 _detectedTargets.value = targets
                 siteState = targets.siteButtonState
                 cashOutEnabled = targets.isCashOutBtnEnabled
+                cashOutClickable = targets.isCashOutBtnClickable
                 collisionError = targets.detectCashOutCollisionReason()
                     ?: fused.conflictReasons.firstOrNull()?.takeIf { fused.hasConflict }
                 if (collisionError == null && targets.isCashOutBtnDetected && targets.isCashOutBtnEnabled &&
+                    targets.isCashOutBtnClickable &&
                     targets.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE &&
                     !fused.hasConflict
                 ) {
-                    cashOutBounds = targets.cashOutButtonBounds
-                    val cashNode = findInteractiveButtonNode(
-                        node = root,
-                        keywords = listOf("cash out", "cashout", "claim", "collect"),
-                        excludedTerms = listOf("auto", "history", "cashback", "all bets", "my bets", "double", "2x", "cancel", "bet", "place bet")
-                    )
-                    if (cashNode != null && runCatching { cashNode.isClickable && cashNode.isEnabled }.getOrDefault(false)) {
-                        val nodeRect = Rect().also { runCatching { cashNode.getBoundsInScreen(it) } }
-                        if (!nodeRect.isEmpty && cashOutBounds != null && isBoundsSafelyContained(nodeRect, cashOutBounds)) {
-                            cashOutClickedViaNode = runCatching { cashNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)
-                        } else if (!nodeRect.isEmpty) {
-                            safeLogW(TAG, "clickCashOutTarget: matching node bounds rejected due to containment mismatch: nodeRect=$nodeRect target=$cashOutBounds")
-                        }
-                    }
+                    val scannedBounds = targets.cashOutButtonBounds?.takeIf { !it.isEmpty }
+                    verifiedClickBounds = scannedBounds?.let { findClickableButtonBounds(root, it, isCashOut = true) }
                 }
             } finally {
                 if (shouldRecycle) safeRecycleRoot(root)
             }
 
-            if (collisionError != null || !cashOutEnabled || siteState != SiteButtonState.CASH_OUT_AVAILABLE) {
-                safeLogW(TAG, "clickCashOutTarget blocked by live validation: state=$siteState enabled=$cashOutEnabled reason=$collisionError")
+            if (collisionError != null || !cashOutEnabled || !cashOutClickable ||
+                siteState != SiteButtonState.CASH_OUT_AVAILABLE || verifiedClickBounds == null || verifiedClickBounds.isEmpty
+            ) {
+                safeLogW(TAG, "clickCashOutTarget blocked by live validation: state=$siteState enabled=$cashOutEnabled clickable=$cashOutClickable clickBounds=$verifiedClickBounds reason=$collisionError")
                 onComplete?.invoke(false)
                 return
             }
-            if (cashOutClickedViaNode) {
-                onComplete?.invoke(true)
+            val settledBounds = awaitStableCashOutLayout()?.takeIf { !it.isEmpty }
+            if (settledBounds == null) {
+                safeLogW(TAG, "clickCashOutTarget aborted: settled clickable CASH OUT bounds unavailable")
+                onComplete?.invoke(false)
                 return
             }
-            if (cashOutBounds != null && !cashOutBounds.isEmpty) {
-                dispatchTouchGesture(cashOutBounds.centerX().toFloat(), cashOutBounds.centerY().toFloat(), onComplete)
+            val settledPair = resolveBestTargetWindowRoot()
+            var finalClickBounds: Rect? = null
+            if (settledPair != null) {
+                val (sRoot, sRecycle) = settledPair
+                try {
+                    finalClickBounds = findClickableButtonBounds(sRoot, settledBounds, isCashOut = true)
+                } finally {
+                    if (sRecycle) safeRecycleRoot(sRoot)
+                }
+            }
+            if (finalClickBounds != null && !finalClickBounds.isEmpty) {
+                dispatchTouchGesture(finalClickBounds.centerX().toFloat(), finalClickBounds.centerY().toFloat(), onComplete)
             } else {
-                safeLogW(TAG, "clickCashOutTarget aborted: verified CASH OUT bounds unavailable")
+                safeLogW(TAG, "clickCashOutTarget aborted: clickable CASH OUT node missing after layout settle")
                 onComplete?.invoke(false)
             }
         } catch (t: Throwable) {
             safeLogE(TAG, "clickCashOutTarget failed", t)
             onComplete?.invoke(false)
         }
+    }
+
+    fun awaitStableLayout(timeoutMs: Long = 1200L, intervalMs: Long = 120L): Rect? {
+        val start = System.currentTimeMillis()
+        var lastBounds: Rect? = null
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val targets = refreshLiveTargetsNow()
+            val validCurrent = targets?.takeIf {
+                it.isBetBtnDetected &&
+                    it.isBetBtnEnabled &&
+                    it.isBetBtnClickable &&
+                    it.siteButtonState == SiteButtonState.IDLE_READY_TO_BET &&
+                    it.betButtonBounds != null &&
+                    !it.betButtonBounds.isEmpty
+            }?.betButtonBounds
+            if (validCurrent != null && validCurrent == lastBounds) {
+                return validCurrent
+            }
+            lastBounds = validCurrent
+            try { Thread.sleep(intervalMs) } catch (_: Throwable) {}
+        }
+        val finalTargets = refreshLiveTargetsNow()
+        return finalTargets?.takeIf {
+            it.isBetBtnDetected &&
+                it.isBetBtnEnabled &&
+                it.isBetBtnClickable &&
+                it.siteButtonState == SiteButtonState.IDLE_READY_TO_BET &&
+                it.betButtonBounds != null &&
+                !it.betButtonBounds.isEmpty
+        }?.betButtonBounds
+    }
+
+    fun awaitStableCashOutLayout(timeoutMs: Long = 1200L, intervalMs: Long = 120L): Rect? {
+        val start = System.currentTimeMillis()
+        var lastBounds: Rect? = null
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val targets = refreshLiveTargetsNow()
+            val validCurrent = targets?.takeIf {
+                it.isCashOutBtnDetected &&
+                    it.isCashOutBtnEnabled &&
+                    it.isCashOutBtnClickable &&
+                    it.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE &&
+                    it.cashOutButtonBounds != null &&
+                    !it.cashOutButtonBounds.isEmpty
+            }?.cashOutButtonBounds
+            if (validCurrent != null && validCurrent == lastBounds) {
+                return validCurrent
+            }
+            lastBounds = validCurrent
+            try { Thread.sleep(intervalMs) } catch (_: Throwable) {}
+        }
+        val finalTargets = refreshLiveTargetsNow()
+        return finalTargets?.takeIf {
+            it.isCashOutBtnDetected &&
+                it.isCashOutBtnEnabled &&
+                it.isCashOutBtnClickable &&
+                it.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE &&
+                it.cashOutButtonBounds != null &&
+                !it.cashOutButtonBounds.isEmpty
+        }?.cashOutButtonBounds
+    }
+
+    private fun findTabNode(node: AccessibilityNodeInfo, tabName: String): AccessibilityNodeInfo? {
+        val visited = IntArray(1)
+        var tabNode: AccessibilityNodeInfo? = null
+        fun search(n: AccessibilityNodeInfo) {
+            if (tabNode != null || visited[0]++ > MAX_SCAN_NODES) return
+            val text = runCatching { n.text?.toString()?.trim()?.lowercase(Locale.US).orEmpty() }.getOrDefault("")
+            val desc = runCatching { n.contentDescription?.toString()?.trim()?.lowercase(Locale.US).orEmpty() }.getOrDefault("")
+            val isClickable = runCatching { n.isClickable }.getOrDefault(false)
+            if ((text == tabName || desc == tabName) && isClickable) {
+                tabNode = n
+                return
+            }
+            for (child in childNodesOf(n)) {
+                search(child)
+            }
+        }
+        search(node)
+        return tabNode
     }
 
     private fun findAutoCashOutToggleNode(
@@ -2192,7 +2987,8 @@ open class AccessibilityController : AccessibilityService() {
         rootNode: AccessibilityNodeInfo,
         depth: Int = 0,
         visitedCount: IntArray = intArrayOf(0),
-        inAutoContext: Boolean = false
+        inAutoContext: Boolean = false,
+        excludeBounds: Rect? = null
     ): AccessibilityNodeInfo? {
         if (depth > MAX_TREE_DEPTH || visitedCount[0] >= MAX_SCAN_NODES) return null
         visitedCount[0]++
@@ -2211,7 +3007,12 @@ open class AccessibilityController : AccessibilityService() {
         val className = try { node.className?.toString().orEmpty() } catch (_: Throwable) { "" }
         val isEditableField = (try { node.isEditable } catch (_: Throwable) { false }) ||
             className.contains("EditText", ignoreCase = true)
-        if (isEditableField && !nowInAuto) {
+        val isExcludedByBounds = excludeBounds != null && !excludeBounds.isEmpty && isEditableField && run {
+            val r = Rect()
+            runCatching { node.getBoundsInScreen(r) }
+            !r.isEmpty && Rect.intersects(r, excludeBounds)
+        }
+        if (isEditableField && !nowInAuto && !isExcludedByBounds) {
             val isAddressBar = lowerId.contains("url_bar") || lowerId.contains("omnibox") || lowerId.contains("location_bar")
             if (!isAddressBar && (
                     metadata.contains("stake") ||
@@ -2227,7 +3028,7 @@ open class AccessibilityController : AccessibilityService() {
 
         val children = childNodesOf(node)
         for (child in children) {
-            val match = findEditableStakeNode(child, rootNode, depth + 1, visitedCount, nowInAuto)
+            val match = findEditableStakeNode(child, rootNode, depth + 1, visitedCount, nowInAuto, excludeBounds)
             if (match != null) {
                 if (match !== child) safeRecycleNode(child, rootNode)
                 return match
@@ -2267,6 +3068,15 @@ open class AccessibilityController : AccessibilityService() {
      * pass-through (`FLAG_NOT_TOUCHABLE`) so floating hands never block their own tap target.
      */
     fun dispatchTouchGesture(x: Float, y: Float, onComplete: ((Boolean) -> Unit)? = null) {
+        dispatchTouchGestureWithDebounce(x, y, 300L, onComplete)
+    }
+
+    private fun dispatchTouchGestureWithDebounce(
+        x: Float,
+        y: Float,
+        minDebounceMs: Long,
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N || !canPerformGesturesSafely()) {
             safeLogW(TAG, "Cannot dispatch gesture: API < N or gesture capability missing.")
             try {
@@ -2296,7 +3106,7 @@ open class AccessibilityController : AccessibilityService() {
 
         val now = System.currentTimeMillis()
         val last = lastDispatchedCoords
-        if (last != null && last.first == x && last.second == y && (now - lastDispatchedTimeMs) < 300L) {
+        if (minDebounceMs > 0L && last != null && last.first == x && last.second == y && (now - lastDispatchedTimeMs) < minDebounceMs) {
             safeLogW(TAG, "Ignoring duplicate gesture at ($x, $y) within debounce window")
             try {
                 onComplete?.invoke(false)

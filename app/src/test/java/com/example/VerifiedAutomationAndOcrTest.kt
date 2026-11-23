@@ -46,6 +46,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -71,9 +72,15 @@ class VerifiedAutomationAndOcrTest {
 
     @After
     fun tearDown() {
-        testEngineScope?.cancel()
+        val job = testEngineScope?.coroutineContext?.get(kotlinx.coroutines.Job)
         testEngineScope = null
-        runBlocking { delay(60L) }
+        runBlocking {
+            job?.let {
+                it.cancel()
+                it.join()
+            }
+            delay(80L)
+        }
         db?.close()
         db = null
     }
@@ -110,6 +117,7 @@ class VerifiedAutomationAndOcrTest {
             targetUiInteractor = interactor
         ).also {
             it.testBalanceOverride = 5000.0
+            it.currentDailyLossProvider = { 0.0 }
         }
     }
 
@@ -500,6 +508,7 @@ class VerifiedAutomationAndOcrTest {
             override fun configureAutoCashOut(
                 enabled: Boolean,
                 targetMultiplier: Double,
+                mode: String,
                 onComplete: (Boolean, String?) -> Unit
             ) {
                 autoCashCalls++
@@ -552,10 +561,10 @@ class VerifiedAutomationAndOcrTest {
         assertEquals(0, betClicks)
         assertEquals(1, autoCashCalls)
 
-        // 4. Exceed stakeEditTimeoutMs (260ms > 200ms) -> aborts
+        // 4. Exceed stakeEditTimeoutMs (1600ms > 1500ms floor) -> aborts
         lastResult = null
         autoCashMatch = true
-        stakeDelayMs = 260L
+        stakeDelayMs = 1600L
         engine.executeVerifiedManualBet(config, limits) { ok, msg -> lastResult = ok to msg }
         assertNotNull(lastResult)
         assertFalse(lastResult!!.first)
@@ -753,5 +762,515 @@ class VerifiedAutomationAndOcrTest {
         assertTrue(savedConfig!!.gameAutoCashOutEnabled)
         assertEquals(2.75, savedConfig!!.gameAutoCashOutTarget, 0.001)
         assertEquals(3.10, savedConfig!!.targetMultiplier, 0.001)
+    }
+
+    @Test
+    fun `phase detection identifies IN_FLIGHT when live multiplier is present even if Bet button is visible for queueing`() {
+        val targets = DetectedUiTargets(
+            detectedMultiplier = 8.72,
+            betButtonBounds = Rect(400, 950, 900, 1100),
+            gamePhase = "IN_FLIGHT",
+            canQueueBet = true
+        )
+        assertEquals("IN_FLIGHT", targets.gamePhase)
+        assertTrue(targets.canQueueBet)
+    }
+
+    @Test
+    fun `StrategyConfig supports gameAutoCashOutMode options OFF ENSURE and SKIP_IF_ALREADY_SET`() {
+        val configDefault = StrategyConfig()
+        assertEquals("ENSURE", configDefault.gameAutoCashOutMode)
+
+        val configSkip = configDefault.copy(gameAutoCashOutMode = "SKIP_IF_ALREADY_SET")
+        assertEquals("SKIP_IF_ALREADY_SET", configSkip.gameAutoCashOutMode)
+
+        val configOff = configDefault.copy(gameAutoCashOutMode = "OFF")
+        assertEquals("OFF", configOff.gameAutoCashOutMode)
+    }
+
+    @Test
+    fun `BET click fails confirmation when post-click rescan returns null or stays IDLE_READY_TO_BET`() = runBlocking {
+        var preClickTargets = DetectedUiTargets(
+            gamePhase = "BETTING_OPEN",
+            siteButtonState = SiteButtonState.IDLE_READY_TO_BET,
+            foregroundPackage = "com.android.chrome",
+            betButtonBounds = Rect(550, 950, 950, 1120),
+            stakeInputBounds = Rect(120, 950, 380, 1020),
+            detectedStakeText = "25.00",
+            countdownRemainingMs = 4500L,
+            isBetBtnEnabled = true,
+            isBetBtnClickable = true
+        )
+        var returnNullAfterClick = true
+        var betClicked = false
+
+        val interactor = object : TargetUiInteractor {
+            override fun applyStake(
+                newStake: Double,
+                progressionMode: StakeProgressionMode,
+                fallbackX: Float?,
+                fallbackY: Float?,
+                onComplete: (Boolean) -> Unit
+            ) = onComplete(true)
+
+            override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
+                betClicked = true
+                onComplete(true)
+            }
+
+            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) = onComplete(true)
+
+            override fun refreshLiveTargets(fallbackTargets: DetectedUiTargets?): DetectedUiTargets? {
+                return if (betClicked && returnNullAfterClick) null else preClickTargets
+            }
+        }
+
+        val engine = createEngine(interactor)
+        val config = StrategyConfig(
+            baseStake = 25.0,
+            isAutoBetEnabled = true,
+            isAutoCashOutEnabled = false,
+            gameAutoCashOutEnabled = false,
+            betWindowTotalTimeoutMs = 6000L
+        )
+        val limits = RiskLimits()
+
+        // Case A: Post-click rescan returns null (window transiently lost / unreadable) -> must fail as unconfirmed
+        var resultNull: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(config, limits) { ok, msg -> resultNull = ok to msg }
+        var waited = 0L
+        while (resultNull == null && waited < 3500L) {
+            delay(50L)
+            waited += 50L
+        }
+        assertNotNull("Expected BET callback after null-rescan timeout", resultNull)
+        assertFalse(resultNull!!.first)
+        assertFalse(engine.isRoundBetActiveState.value)
+        assertEquals(com.example.data.model.ActionExecutionState.FAILED, engine.executionState.value)
+
+        // Case B: Post-click rescan returns unchanged IDLE_READY_TO_BET (site ignored tap) -> must fail as unconfirmed
+        betClicked = false
+        returnNullAfterClick = false
+        var resultUnchanged: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(config, limits) { ok, msg -> resultUnchanged = ok to msg }
+        waited = 0L
+        while (resultUnchanged == null && waited < 3500L) {
+            delay(50L)
+            waited += 50L
+        }
+        assertNotNull("Expected BET callback after unchanged-state timeout", resultUnchanged)
+        assertFalse(resultUnchanged!!.first)
+        assertFalse(engine.isRoundBetActiveState.value)
+        assertEquals(com.example.data.model.ActionExecutionState.FAILED, engine.executionState.value)
+    }
+
+    @Test
+    fun `Cash Out verification never falls back to cached game state when fresh post-click rescan returns null`() = runBlocking {
+        var cashOutClicked = false
+        var postClickResult: DetectedUiTargets? = null
+        val cashOutReadyTargets = DetectedUiTargets(
+            gamePhase = "IN_FLIGHT",
+            siteButtonState = SiteButtonState.CASH_OUT_AVAILABLE,
+            foregroundPackage = "com.android.chrome",
+            cashOutButtonBounds = Rect(550, 950, 950, 1120),
+            isCashOutBtnEnabled = true,
+            isCashOutBtnClickable = true
+        )
+
+        val interactor = object : TargetUiInteractor {
+            override val requiresPostActionVerification: Boolean = true
+            override fun applyStake(
+                newStake: Double,
+                progressionMode: StakeProgressionMode,
+                fallbackX: Float?,
+                fallbackY: Float?,
+                onComplete: (Boolean) -> Unit
+            ) = onComplete(true)
+
+            override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) = onComplete(true)
+
+            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
+                cashOutClicked = true
+                onComplete(true)
+            }
+
+            override fun refreshLiveTargets(fallbackTargets: DetectedUiTargets?): DetectedUiTargets? {
+                return if (!cashOutClicked) cashOutReadyTargets else postClickResult
+            }
+        }
+
+        val engine = createEngine(interactor)
+        // Cached gameDetection state intentionally stays IDLE_READY_TO_BET (different from CASH_OUT_AVAILABLE)
+        // to ensure verification cannot shortcut or fall back to cached state when refreshLiveTargets(null) returns null.
+        val config = StrategyConfig(
+            baseStake = 25.0,
+            targetMultiplier = 2.00,
+            isAutoBetEnabled = true,
+            isAutoCashOutEnabled = true,
+            cashOutUntrackedBets = true,
+            minFlightTimeBeforeCashOutMs = 0L
+        )
+        val limits = RiskLimits()
+        engine.startAutomation(config, limits)
+        engine.handlePhaseUpdate("IN_FLIGHT", 2.50, config, limits, 1_700_000_010_000L, SiteButtonState.CASH_OUT_AVAILABLE)
+
+        assertTrue(cashOutClicked)
+        var waited = 0L
+        while (engine.executionState.value != com.example.data.model.ActionExecutionState.FAILED && waited < 3500L) {
+            delay(50L)
+            waited += 50L
+        }
+        assertEquals(com.example.data.model.ActionExecutionState.FAILED, engine.executionState.value)
+
+        // Now verify Manual Cash Out also refuses null rescan and succeeds only on fresh non-null transition
+        cashOutClicked = false
+        postClickResult = null
+        var manualFailResult: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualCashOut(config, limits) { ok, msg -> manualFailResult = ok to msg }
+        waited = 0L
+        while (manualFailResult == null && waited < 3500L) {
+            delay(50L)
+            waited += 50L
+        }
+        assertNotNull(manualFailResult)
+        assertFalse(manualFailResult!!.first)
+
+        // Fresh transition from CASH_OUT_AVAILABLE -> IDLE_READY_TO_BET confirms Manual Cash Out
+        cashOutClicked = false
+        postClickResult = DetectedUiTargets(
+            gamePhase = "IN_FLIGHT",
+            siteButtonState = SiteButtonState.IDLE_READY_TO_BET,
+            foregroundPackage = "com.android.chrome",
+            betButtonBounds = Rect(550, 950, 950, 1120)
+        )
+        var manualSuccessResult: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualCashOut(config, limits) { ok, msg -> manualSuccessResult = ok to msg }
+        waited = 0L
+        while (manualSuccessResult == null && waited < 1500L) {
+            delay(50L)
+            waited += 50L
+        }
+        assertNotNull(manualSuccessResult)
+        assertTrue("Expected Manual Cash Out to confirm on fresh transition, got: ${manualSuccessResult?.second}", manualSuccessResult!!.first)
+    }
+
+    @Test
+    fun `queueBetDuringFlight false blocks IN_FLIGHT bet while true allows queuing and logs BetTransactionManager lifecycle`() = runBlocking {
+        var betClicked = false
+        val inFlightTargets = DetectedUiTargets(
+            gamePhase = "IN_FLIGHT",
+            siteButtonState = SiteButtonState.IDLE_READY_TO_BET,
+            foregroundPackage = "com.android.chrome",
+            betButtonBounds = Rect(550, 950, 950, 1120),
+            stakeInputBounds = Rect(120, 950, 420, 1020),
+            detectedStakeText = "25.00",
+            isBetBtnEnabled = true,
+            isBetBtnClickable = true,
+            detectedMultiplier = 4.25
+        )
+        val queuedTargets = inFlightTargets.copy(
+            siteButtonState = SiteButtonState.BET_QUEUED,
+            betButtonBounds = null,
+            isCancelBtnDetected = true
+        )
+
+        val interactor = object : TargetUiInteractor {
+            override val requiresPostActionVerification: Boolean = true
+            override fun applyStake(
+                newStake: Double,
+                progressionMode: StakeProgressionMode,
+                fallbackX: Float?,
+                fallbackY: Float?,
+                onComplete: (Boolean) -> Unit
+            ) = onComplete(true)
+
+            override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
+                betClicked = true
+                onComplete(true)
+            }
+
+            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) = onComplete(true)
+
+            override fun refreshLiveTargets(fallbackTargets: DetectedUiTargets?): DetectedUiTargets? {
+                return if (betClicked) queuedTargets else inFlightTargets
+            }
+        }
+
+        val engine = createEngine(interactor)
+        val blockedConfig = StrategyConfig(
+            baseStake = 25.0,
+            isAutoBetEnabled = true,
+            isAutoCashOutEnabled = false,
+            gameAutoCashOutEnabled = false,
+            queueBetDuringFlight = false
+        )
+        val limits = RiskLimits()
+
+        var blockedResult: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(blockedConfig, limits) { ok, msg -> blockedResult = ok to msg }
+        var waited = 0L
+        while (blockedResult == null && waited < 1500L) {
+            delay(25L)
+            waited += 25L
+        }
+        assertNotNull(blockedResult)
+        assertFalse(blockedResult!!.first)
+        assertFalse("Mid-flight bet must not click when queueBetDuringFlight is false", betClicked)
+
+        // When queueBetDuringFlight = true, queuing succeeds and records transaction lifecycle
+        betClicked = false
+        val allowedConfig = blockedConfig.copy(queueBetDuringFlight = true)
+        var allowedResult: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(allowedConfig, limits) { ok, msg -> allowedResult = ok to msg }
+        waited = 0L
+        while (allowedResult == null && waited < 2000L) {
+            delay(25L)
+            waited += 25L
+        }
+        assertNotNull(allowedResult)
+        assertTrue("Expected queued bet to succeed, got: ${allowedResult?.second}", allowedResult!!.first)
+        assertTrue(betClicked)
+
+        // Wait briefly for txLaunch coroutine to record BET_ACCEPTED
+        delay(100L)
+        val latestTx = engine.betTransactions.recentJournal.value.firstOrNull()
+        assertNotNull(latestTx)
+        assertEquals(com.example.data.model.BetTransactionLifecycleState.BET_ACCEPTED, latestTx?.state)
+    }
+
+    @Test
+    fun `mid-flight ScreenEarnerAccessibilityService keeps isReady true when live multiplier is detected`() {
+        val midFlightNoBetButtons = DetectedUiTargets(
+            gamePhase = "IN_FLIGHT",
+            siteButtonState = SiteButtonState.UNKNOWN,
+            foregroundPackage = "com.android.chrome",
+            detectedMultiplier = 3.45,
+            isCancelBtnDetected = false,
+            ribbonMultipliers = listOf(1.20, 2.50, 1.80)
+        )
+        val uncertainOcr = OcrFrameSnapshot(
+            elements = listOf(OcrTextElement("blur", Rect(10, 10, 80, 40), 0.25f)),
+            fullText = "blur",
+            frameWidth = 1080,
+            frameHeight = 1920,
+            capturedAtMs = 1_700_000_000_000L,
+            averageConfidence = 0.25f
+        )
+
+        val state = com.example.service.ScreenEarnerAccessibilityService.buildAndPublishFusedState(
+            rawTargets = midFlightNoBetButtons,
+            packageName = "com.android.chrome",
+            ocrSnapshot = uncertainOcr,
+            nowMs = 1_700_000_000_100L
+        )
+        assertTrue(state.isGameDetected)
+        assertTrue("Expected mid-flight state to stay ready when live multiplier is present", state.isReady)
+    }
+
+    @Test
+    fun `AutomationEngine learns min stake via probeMinStake without cancelling armed strategy session and blocks under-min stakes`() = runBlocking {
+        var betClicked = false
+        var probeCalls = 0
+        val readyTargets = DetectedUiTargets(
+            gamePhase = "BETTING_OPEN",
+            siteButtonState = SiteButtonState.IDLE_READY_TO_BET,
+            foregroundPackage = "com.android.chrome",
+            betButtonBounds = Rect(550, 950, 950, 1120),
+            stakeInputBounds = Rect(120, 950, 380, 1020),
+            stakeMinusBounds = Rect(55, 950, 110, 1020),
+            detectedStakeText = "50.00",
+            countdownRemainingMs = 5000L,
+            isBetBtnEnabled = true,
+            isBetBtnClickable = true
+        )
+        val queuedTargets = readyTargets.copy(
+            siteButtonState = SiteButtonState.BET_QUEUED,
+            betButtonBounds = null,
+            isCancelBtnDetected = true
+        )
+
+        val interactor = object : TargetUiInteractor {
+            override val requiresPostActionVerification: Boolean = true
+            override fun probeMinStake(onDone: (Double?) -> Unit) {
+                probeCalls++
+                onDone(20.0)
+            }
+            override fun applyStake(
+                newStake: Double,
+                progressionMode: StakeProgressionMode,
+                fallbackX: Float?,
+                fallbackY: Float?,
+                onComplete: (Boolean) -> Unit
+            ) = onComplete(true)
+
+            override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
+                betClicked = true
+                onComplete(true)
+            }
+
+            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) = onComplete(true)
+
+            override fun refreshLiveTargets(fallbackTargets: DetectedUiTargets?): DetectedUiTargets? {
+                return if (betClicked) queuedTargets else readyTargets
+            }
+        }
+
+        val engine = createEngine(interactor)
+        val config = StrategyConfig(
+            baseStake = 50.0,
+            isAutoBetEnabled = true,
+            isAutoCashOutEnabled = false,
+            gameAutoCashOutEnabled = false,
+            isStrategy1Enabled = true
+        ).withUpdatedRule(
+            StrategyRuleConfig(
+                ruleId = StrategyRuleId.AFTER_2_LOSSES,
+                isEnabled = true,
+                requiredLosses = 2
+            )
+        )
+        val limits = RiskLimits()
+        engine.startAutomation(config, limits)
+        engine.strategyEngine.bindStrategyConfig(config)
+        // Arm a strategy session before BETTING_OPEN
+        engine.strategyEngine.processCompletedRound(1.20, config, 1_700_000_000_000L)
+        engine.strategyEngine.processCompletedRound(1.10, config, 1_700_000_001_000L)
+        assertTrue(engine.strategyEngine.getState().isBettingSessionActive)
+
+        // Round 1: First-time probe runs and keeps the strategy session ARMED for next round
+        var probeResult: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(config, limits) { ok, msg -> probeResult = ok to msg }
+        var waited = 0L
+        while (probeResult == null && waited < 1500L) {
+            delay(25L)
+            waited += 25L
+        }
+        assertNotNull(probeResult)
+        assertFalse(probeResult!!.first)
+        assertTrue(probeResult!!.second.contains("Learned site min stake"))
+        assertEquals(1, probeCalls)
+        assertFalse(betClicked)
+        assertTrue("Strategy session must stay armed after limits_probe", engine.strategyEngine.getState().isBettingSessionActive)
+
+        // Round 2: Because session stayed ARMED (50.0 >= 20.0 learned min), betting resumes and succeeds immediately
+        var validResult: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(config, limits) { ok, msg -> validResult = ok to msg }
+        waited = 0L
+        while (validResult == null && waited < 2000L) {
+            delay(25L)
+            waited += 25L
+        }
+        assertNotNull(validResult)
+        assertTrue("Expected armed session bet >= learned min to succeed, got: ${validResult?.second}", validResult!!.first)
+        assertTrue(betClicked)
+        assertEquals(1, probeCalls)
+
+        // Settle Round 2, return to BETTING_OPEN, and test baseStake (10.0) < learned min (20.0) -> blocked before clicking
+        betClicked = false
+        engine.settleActiveRoundBetIfNeeded(2.50, config, limits, currentTimeMs = 1_700_000_005_000L)
+        engine.strategyEngine.reset(10.0)
+        var underMinResult: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(config.copy(baseStake = 10.0), limits) { ok, msg -> underMinResult = ok to msg }
+        waited = 0L
+        while (underMinResult == null && waited < 1500L) {
+            delay(25L)
+            waited += 25L
+        }
+        assertNotNull(underMinResult)
+        assertFalse(underMinResult!!.first)
+        assertTrue(
+            "Expected learned-min rejection, got: ${underMinResult!!.second}",
+            underMinResult!!.second.contains("below the learned site min")
+        )
+        assertEquals(1, probeCalls)
+        assertFalse(betClicked)
+    }
+
+    @Test
+    fun `AutomationEngine learns site limits from rejection message and persists to matching PlatformProfile`() = runBlocking {
+        var clickCount = 0
+        var refreshedAfterFail = DetectedUiTargets(
+            gamePhase = "BETTING_OPEN",
+            siteButtonState = SiteButtonState.IDLE_READY_TO_BET,
+            foregroundPackage = "com.android.chrome",
+            betButtonBounds = Rect(550, 950, 950, 1120),
+            stakeInputBounds = Rect(120, 950, 380, 1020),
+            detectedStakeText = "25.00",
+            pageTextHints = listOf("Minimum bet is 50", "Maximum bet 5000"),
+            countdownRemainingMs = 5000L,
+            isBetBtnEnabled = true,
+            isBetBtnClickable = true
+        )
+
+        val interactor = object : TargetUiInteractor {
+            override fun applyStake(
+                newStake: Double,
+                progressionMode: StakeProgressionMode,
+                fallbackX: Float?,
+                fallbackY: Float?,
+                onComplete: (Boolean) -> Unit
+            ) = onComplete(false) // Triggers finishFailed which scans rejection message
+
+            override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
+                clickCount++
+                onComplete(true)
+            }
+
+            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) = onComplete(true)
+
+            override fun refreshLiveTargets(fallbackTargets: DetectedUiTargets?): DetectedUiTargets = refreshedAfterFail
+        }
+
+        val engine = createEngine(interactor)
+        engine.repository.seedDefaultsIfEmpty()
+        val config = StrategyConfig(
+            baseStake = 25.0,
+            isAutoBetEnabled = true,
+            isAutoCashOutEnabled = false,
+            gameAutoCashOutEnabled = false
+        )
+        val limits = RiskLimits()
+
+        // First attempt fails stake edit -> finishFailed reads "Minimum bet is 50" & "Maximum bet 5000"
+        var firstRes: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(config, limits) { ok, msg -> firstRes = ok to msg }
+        var waited = 0L
+        while (firstRes == null && waited < 1500L) {
+            delay(25L)
+            waited += 25L
+        }
+        assertNotNull(firstRes)
+        assertFalse(firstRes!!.first)
+        delay(120L)
+
+        // Verify matching BetPawa Aviator PlatformProfile persisted the learned bounds
+        val savedProfile = engine.repository.profiles.first()
+            .firstOrNull { it.platformName == "BetPawa Aviator" }
+        assertNotNull(savedProfile)
+        assertEquals(50.0, savedProfile!!.minStake, 0.001)
+        assertEquals(5000.0, savedProfile.maxStake, 0.001)
+
+        // Simulate the temporary rejection toast disappearing on subsequent rounds
+        refreshedAfterFail = refreshedAfterFail.copy(pageTextHints = emptyList())
+
+        // Next attempt below 50 or above 5000 is blocked immediately in Step 1
+        var underMinRes: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(config.copy(baseStake = 25.0), limits) { ok, msg -> underMinRes = ok to msg }
+        waited = 0L
+        while (underMinRes == null && waited < 1500L) {
+            delay(25L)
+            waited += 25L
+        }
+        assertTrue(underMinRes!!.second.contains("below the learned site min"))
+
+        var overMaxRes: Pair<Boolean, String>? = null
+        engine.executeVerifiedManualBet(config.copy(baseStake = 6000.0), limits) { ok, msg -> overMaxRes = ok to msg }
+        waited = 0L
+        while (overMaxRes == null && waited < 1500L) {
+            delay(25L)
+            waited += 25L
+        }
+        assertTrue(overMaxRes!!.second.contains("above the learned site max"))
+        assertEquals(0, clickCount)
     }
 }

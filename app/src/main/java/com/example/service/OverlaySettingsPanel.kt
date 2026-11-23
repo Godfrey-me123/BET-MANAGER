@@ -143,6 +143,12 @@ fun OverlaySettingsPanelComposable(
     var gameAutoCashTargetText by remember(strategyConfig.gameAutoCashOutTarget) {
         mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.gameAutoCashOutTarget))
     }
+    var minStakeText by remember(strategyConfig.minStake) {
+        mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.minStake))
+    }
+    var maxStakeText by remember(strategyConfig.maxStake) {
+        mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.maxStake))
+    }
     var minFlightTimeText by remember(strategyConfig.minFlightTimeBeforeCashOutMs) {
         mutableStateOf(strategyConfig.minFlightTimeBeforeCashOutMs.toString())
     }
@@ -458,7 +464,56 @@ fun OverlaySettingsPanelComposable(
                                 .fillMaxWidth()
                                 .testTag("overlay_settings_game_auto_cashout_target_input")
                         )
+                        Text("Auto Cash Out Mode", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            listOf("OFF", "ENSURE", "SKIP_IF_ALREADY_SET").forEach { m ->
+                                FilterChip(
+                                    selected = localConfig.gameAutoCashOutMode == m,
+                                    onClick = { pushConfig(localConfig.copy(gameAutoCashOutMode = m)) },
+                                    label = { Text(m, fontSize = 9.sp) },
+                                    modifier = Modifier.testTag("overlay_settings_autocash_mode_$m")
+                                )
+                            }
+                        }
                     }
+                    OverlayToggleRow(
+                        label = "Also cash out bets I placed by hand",
+                        checked = localConfig.cashOutUntrackedBets,
+                        testTag = "overlay_settings_cashout_untracked_switch",
+                        onCheckedChange = { pushConfig(localConfig.copy(cashOutUntrackedBets = it)) }
+                    )
+                    OverlayToggleRow(
+                        label = "Allow betting while the plane is flying (queues next round)",
+                        checked = localConfig.queueBetDuringFlight,
+                        testTag = "overlay_settings_queue_bet_switch",
+                        onCheckedChange = { pushConfig(localConfig.copy(queueBetDuringFlight = it)) }
+                    )
+                    OutlinedTextField(
+                        value = minStakeText,
+                        onValueChange = { raw ->
+                            minStakeText = raw
+                            raw.toDoubleOrNull()?.takeIf { it >= 0.0 }?.let { v -> pushConfig(localConfig.copy(minStake = v)) }
+                        },
+                        label = { Text("Min stake (0 = no limit)", fontSize = 11.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("overlay_settings_min_stake_input")
+                    )
+                    OutlinedTextField(
+                        value = maxStakeText,
+                        onValueChange = { raw ->
+                            maxStakeText = raw
+                            raw.toDoubleOrNull()?.takeIf { it >= 0.0 }?.let { v -> pushConfig(localConfig.copy(maxStake = v)) }
+                        },
+                        label = { Text("Max stake (0 = no limit)", fontSize = 11.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("overlay_settings_max_stake_input")
+                    )
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
 
@@ -1246,6 +1301,17 @@ fun DedicatedHandSettingsComposable(
                                 .fillMaxWidth()
                                 .testTag("hand_settings_game_auto_cashout_target_input")
                         )
+                        Text("Auto Cash Out Mode", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            listOf("OFF", "ENSURE", "SKIP_IF_ALREADY_SET").forEach { m ->
+                                FilterChip(
+                                    selected = localConfig.gameAutoCashOutMode == m,
+                                    onClick = { localConfig = localConfig.copy(gameAutoCashOutMode = m) },
+                                    label = { Text(m, fontSize = 9.sp) },
+                                    modifier = Modifier.testTag("hand_settings_autocash_mode_$m")
+                                )
+                            }
+                        }
                     }
 
                     Text(

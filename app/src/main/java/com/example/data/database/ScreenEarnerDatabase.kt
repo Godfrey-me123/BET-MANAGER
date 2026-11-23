@@ -41,7 +41,7 @@ import com.example.data.model.StrategyConfig
         AlarmProfileEntity::class,
         MonitoringSessionEntity::class
     ],
-    version = 15,
+    version = 19,
     exportSchema = false
 )
 @TypeConverters(ScreenEarnerTypeConverters::class)
@@ -212,6 +212,33 @@ abstract class ScreenEarnerDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "strategy_configs", "gameAutoCashOutMode", "TEXT NOT NULL DEFAULT 'ENSURE'")
+            }
+        }
+
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "platform_profiles", "minStake", "REAL NOT NULL DEFAULT 1.0")
+                addColumnIfMissing(db, "platform_profiles", "maxStake", "REAL NOT NULL DEFAULT 1000000.0")
+            }
+        }
+
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "strategy_configs", "minStake", "REAL NOT NULL DEFAULT 0.0")
+                addColumnIfMissing(db, "strategy_configs", "maxStake", "REAL NOT NULL DEFAULT 0.0")
+                addColumnIfMissing(db, "strategy_configs", "cashOutUntrackedBets", "INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfMissing(db, "strategy_configs", "queueBetDuringFlight", "INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getDatabase(context: Context): ScreenEarnerDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -219,7 +246,7 @@ abstract class ScreenEarnerDatabase : RoomDatabase() {
                     ScreenEarnerDatabase::class.java,
                     "screen_earner_db"
                 )
-                    .addMigrations(MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
+                    .addMigrations(MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19)
                     .fallbackToDestructiveMigration(true)
                     .build()
 

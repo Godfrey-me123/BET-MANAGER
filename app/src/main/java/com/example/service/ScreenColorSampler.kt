@@ -45,6 +45,47 @@ object ScreenColorSampler {
     }
 
     /**
+     * Best-effort read of an on/off switch from pixels: an ON switch is filled with a saturated colour (green),
+     * an OFF switch is dark grey with a grey knob. Returns null when no frame is available or the area is too small,
+     * so callers never act on a guess.
+     */
+    fun isSwitchOn(bounds: Rect?): Boolean? {
+        if (bounds == null || bounds.isEmpty) return null
+        val bmp = latestFrameRef.get() ?: return null
+        if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return null
+        val left = bounds.left.coerceIn(0, bmp.width - 1)
+        val right = bounds.right.coerceIn(left + 1, bmp.width)
+        val top = bounds.top.coerceIn(0, bmp.height - 1)
+        val bottom = bounds.bottom.coerceIn(top + 1, bmp.height)
+        val w = right - left
+        val h = bottom - top
+        if (w < 6 || h < 4) return null
+        val stepX = (w / 10).coerceAtLeast(1)
+        val stepY = (h / 5).coerceAtLeast(1)
+        var total = 0
+        var vivid = 0
+        var y = top + stepY / 2
+        while (y < bottom) {
+            var x = left + stepX / 2
+            while (x < right) {
+                val pixel = try { bmp.getPixel(x, y) } catch (_: Throwable) { x += stepX; continue }
+                val r = ((pixel ushr 16) and 0xFF) / 255f
+                val g = ((pixel ushr 8) and 0xFF) / 255f
+                val b = (pixel and 0xFF) / 255f
+                val maxC = maxOf(r, g, b)
+                val minC = minOf(r, g, b)
+                val sat = if (maxC <= 0f) 0f else (maxC - minC) / maxC
+                total++
+                if (sat > 0.45f && maxC > 0.35f) vivid++
+                x += stepX
+            }
+            y += stepY
+        }
+        if (total < 6) return null
+        return vivid.toFloat() / total.toFloat() > 0.20f
+    }
+
+    /**
      * Samples the dominant vivid non-background color inside [bounds] on the latest captured frame.
      * Falls back to interior center pixels if dark/light grayscale frame dominates.
      */

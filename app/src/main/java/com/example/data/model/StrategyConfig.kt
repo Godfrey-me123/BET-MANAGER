@@ -172,10 +172,18 @@ data class StrategyConfig(
     // Game-side Auto Cash Out & Betting-Window Step Timing settings
     val gameAutoCashOutEnabled: Boolean = false,
     val gameAutoCashOutTarget: Double = 2.00,
+    val gameAutoCashOutMode: String = "ENSURE", // "OFF", "ENSURE", "SKIP_IF_ALREADY_SET"
     val stakeEditTimeoutMs: Long = 500L,
     val autoCashOutTimeoutMs: Long = 500L,
     val betWindowTotalTimeoutMs: Long = 3000L,
-    val minRemainingBetWindowMs: Long = 1200L
+    val minRemainingBetWindowMs: Long = 1200L,
+    // Your own stake limits (0 = no limit). The site's min/max is not shown on the main game screen.
+    val minStake: Double = 0.0,
+    val maxStake: Double = 0.0,
+    // true = also auto cash out a bet you placed by hand (any visible Cash Out button); false = only bets this app placed.
+    val cashOutUntrackedBets: Boolean = true,
+    /** When false (default) the app only bets while the round is not in flight; true lets it queue the next round mid-flight. */
+    val queueBetDuringFlight: Boolean = false
 ) {
     fun resolvedMasterProgressionMode(): StakeProgressionMode {
         return if (lossProgressionEnabled && lossProgressionMode != StakeProgressionMode.DISABLED) {

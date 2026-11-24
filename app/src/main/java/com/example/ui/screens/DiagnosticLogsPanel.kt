@@ -25,6 +25,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -44,7 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,7 +79,7 @@ fun DiagnosticLogsPanel(
         }
     }
 
-    Column(modifier = modifier.fillMaxSize().testTag("diagnostic_logs_panel")) {
+    Column(modifier = modifier.fillMaxSize()) {
         // Toolbar
         Row(
             modifier = Modifier
@@ -98,19 +99,17 @@ fun DiagnosticLogsPanel(
                     val text = AppLogManager.exportAllText(levelFilter)
                     copyToClipboard(context, text, "App logs copied (${filtered.size} lines)")
                 },
-                contentPadding = ButtonDefaults.ContentPadding,
-                modifier = Modifier.testTag("app_logs_copy_all_btn")
+                contentPadding = ButtonDefaults.ContentPadding
             ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "Copy All Logs", modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Copy All", fontSize = 12.sp)
             }
             OutlinedButton(
                 onClick = { AppLogManager.clear() },
-                contentPadding = ButtonDefaults.ContentPadding,
-                modifier = Modifier.testTag("app_logs_clear_btn")
+                contentPadding = ButtonDefaults.ContentPadding
             ) {
-                Icon(Icons.Default.Delete, contentDescription = "Clear App Logs", modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.Delete, contentDescription = "Clear", modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Clear", fontSize = 12.sp)
             }
@@ -126,8 +125,7 @@ fun DiagnosticLogsPanel(
             FilterChip(
                 selected = levelFilter == null,
                 onClick = { levelFilter = null },
-                label = { Text("All", fontSize = 11.sp) },
-                modifier = Modifier.testTag("app_logs_filter_all")
+                label = { Text("All", fontSize = 11.sp) }
             )
             listOf(
                 AppLogLevel.SUCCESS,
@@ -138,8 +136,7 @@ fun DiagnosticLogsPanel(
                 FilterChip(
                     selected = levelFilter == lvl,
                     onClick = { levelFilter = if (levelFilter == lvl) null else lvl },
-                    label = { Text(lvl.label, fontSize = 11.sp) },
-                    modifier = Modifier.testTag("app_logs_filter_${lvl.label.lowercase()}")
+                    label = { Text(lvl.label, fontSize = 11.sp) }
                 )
             }
         }

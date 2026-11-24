@@ -72,43 +72,6 @@ class RiskManager {
             return sessionLimitCheck
         }
 
-        if (balanceStatus == com.example.data.model.BalanceDetectionStatus.UNAVAILABLE) {
-            return RiskCheckResult(
-                false,
-                "Cannot place bet: Balance is UNAVAILABLE (${balanceFailureReason ?: "Not visible on screen"})."
-            )
-        }
-
-        if (balanceStatus == com.example.data.model.BalanceDetectionStatus.SCANNING) {
-            return RiskCheckResult(
-                false,
-                "Cannot place bet: Balance is still SCANNING. Waiting for verified reading."
-            )
-        }
-
-        if (balanceStatus == com.example.data.model.BalanceDetectionStatus.STALE) {
-            return RiskCheckResult(
-                false,
-                "Cannot place bet: Balance reading is STALE (${balanceFailureReason ?: "Needs refresh"})."
-            )
-        }
-
-        if (balanceStatus != com.example.data.model.BalanceDetectionStatus.VERIFIED &&
-            balanceStatus != com.example.data.model.BalanceDetectionStatus.DETECTED
-        ) {
-            return RiskCheckResult(
-                false,
-                "Cannot place bet: Verified account balance is unavailable (${balanceFailureReason ?: balanceStatus.name})."
-            )
-        }
-
-        if (!currentBalance.isFinite() || currentBalance < 0.0) {
-            return RiskCheckResult(
-                false,
-                "Cannot place bet: Verified account balance is unavailable ($currentBalance)."
-            )
-        }
-
         if (proposedStake > limits.maxSingleStake) {
             return RiskCheckResult(
                 false,
@@ -149,21 +112,6 @@ class RiskManager {
             return RiskCheckResult(
                 false,
                 "Maximum stake progression level (${limits.maxProgressionLevel}) reached."
-            )
-        }
-
-        if (currentBalance < proposedStake) {
-            return RiskCheckResult(
-                false,
-                "Insufficient balance (${formatMoney(currentBalance)}) for required stake (${formatMoney(proposedStake)})."
-            )
-        }
-
-        val requiredReserve = max(limits.minBalanceThreshold, limits.safetyReserveAmount)
-        if ((currentBalance - proposedStake) < requiredReserve) {
-            return RiskCheckResult(
-                false,
-                "Balance would drop below protected reserve (${formatMoney(requiredReserve)})."
             )
         }
 

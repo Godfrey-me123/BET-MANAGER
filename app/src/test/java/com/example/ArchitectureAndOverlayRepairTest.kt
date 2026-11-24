@@ -105,9 +105,6 @@ class ArchitectureAndOverlayRepairTest {
 
             override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) =
                 onComplete(true)
-
-            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) =
-                onComplete(true)
         }
     ): Triple<Context, ScreenEarnerRepository, AutomationEngine> {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -383,7 +380,6 @@ class ArchitectureAndOverlayRepairTest {
         var dismissCalls = 0
         var applyCalls = 0
         var betClickCalls = 0
-        var cashOutCalls = 0
         var buttonReadyResult = false
         var allowApplyStake = true
 
@@ -401,11 +397,6 @@ class ArchitectureAndOverlayRepairTest {
 
             override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
                 betClickCalls++
-                onComplete(true)
-            }
-
-            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
-                cashOutCalls++
                 onComplete(true)
             }
 
@@ -494,50 +485,41 @@ class ArchitectureAndOverlayRepairTest {
         assertEquals(1, applyCalls)
         assertEquals(1, betClickCalls)
 
-        // 3. Enter IN_FLIGHT -> too early (< 1500ms elapsed) even if 2.05x appears -> Cash Out withheld
+        // 3. Enter IN_FLIGHT -> game handles Cash Out; app does not fire extra bets or duplicate clicks
         AutomationController.processDetectionEvent(
             buildDetection("IN_FLIGHT", SiteButtonState.CASH_OUT_AVAILABLE, liveMult = 1.15, ribbon = listOf(1.50, 1.25), roundId = "R-203", nowMs = now + 12_000L),
             isAccessibilityConnected = true,
             nowMs = now + 12_000L
         )
         AutomationController.processDetectionEvent(
-            buildDetection("IN_FLIGHT", SiteButtonState.CASH_OUT_AVAILABLE, liveMult = 2.05, ribbon = listOf(1.50, 1.25), roundId = "R-203", nowMs = now + 12_800L),
-            isAccessibilityConnected = true,
-            nowMs = now + 12_800L
-        )
-        assertEquals(0, cashOutCalls)
-
-        // 4. After minFlightTimeBeforeCashOutMs (1500ms) passes -> Cash Out executes cleanly
-        AutomationController.processDetectionEvent(
             buildDetection("IN_FLIGHT", SiteButtonState.CASH_OUT_AVAILABLE, liveMult = 2.25, ribbon = listOf(1.50, 1.25), roundId = "R-203", nowMs = now + 14_000L),
             isAccessibilityConnected = true,
             nowMs = now + 14_000L
         )
-        assertEquals(1, cashOutCalls)
+        assertEquals(1, betClickCalls)
     }
 
     @Test
-    fun `riskManager enforces maxSequenceExposure maxDailyLoss and safetyReserveAmount`() {
+    fun `riskManager enforces maxSingleStake maxSequenceExposure and maxDailyLoss`() {
         val rm = RiskManager()
         val limits = RiskLimits(
             maxSingleStake = 200.0,
             maxSessionLoss = 500.0,
             maxSequenceExposure = 60.0,
-            maxDailyLoss = 120.0,
-            safetyReserveAmount = 80.0
+            maxDailyLoss = 120.0
         )
 
-        val reserveViolation = rm.validateBetExecution(
-            proposedStake = 30.0,
+        val singleStakeViolation = rm.validateBetExecution(
+            proposedStake = 250.0,
             currentSessionLoss = 0.0,
             currentRounds = 1,
             currentProgressionLevel = 1,
-            currentBalance = 100.0, // remaining 70 < safetyReserveAmount 80
+            currentBalance = 100.0,
             limits = limits,
             balanceStatus = BalanceDetectionStatus.VERIFIED
         )
-        assertFalse(reserveViolation.isAllowed)
-        assertTrue(reserveViolation.violationReason?.contains("protected reserve", ignoreCase = true) == true)
+        assertFalse(singleStakeViolation.isAllowed)
+        assertTrue(singleStakeViolation.violationReason?.contains("single stake", ignoreCase = true) == true)
 
         val seqExposureViolation = rm.validateBetExecution(
             proposedStake = 40.0,

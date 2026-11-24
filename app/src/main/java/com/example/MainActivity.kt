@@ -228,8 +228,6 @@ class MainActivity : ComponentActivity() {
                 val shortcuts by viewModel.shortcuts.collectAsStateWithLifecycle()
                 val betShortcut = shortcuts.firstOrNull { it.type == ShortcutType.BET && it.isCalibrated && it.targetX > 0f }
                     ?: shortcuts.firstOrNull { it.type == ShortcutType.BET && it.label.contains("HAND", ignoreCase = true) }
-                val cashOutShortcut = shortcuts.firstOrNull { it.type == ShortcutType.CASH_OUT && it.isCalibrated && it.targetX > 0f }
-                    ?: shortcuts.firstOrNull { it.type == ShortcutType.CASH_OUT }
 
                 var showHandSettingsDialog by remember { mutableStateOf(false) }
 
@@ -361,7 +359,6 @@ class MainActivity : ComponentActivity() {
                                 onSnoozeAlarm = { AlarmAudioController.snoozeAlarm(5) },
                                 onEndSessionAndClearData = { viewModel.endSessionAndClearSessionData() },
                                 onToggleAutoBet = { viewModel.toggleAutoBet(it) },
-                                onToggleAutoCashOut = { viewModel.toggleAutoCashOut(it) },
                                 onToggleActionHand = { floatingHandsManager.showOrToggleUnifiedHand() },
                                 onOpenHandSettings = { showHandSettingsDialog = true },
                                 queuedOpportunitiesCount = queuedOpportunitiesCount,
@@ -520,7 +517,8 @@ class MainActivity : ComponentActivity() {
                                 onClearHistoryByScope = { scope, gId -> viewModel.clearHistoryByScope(scope, gId) },
                                 selectedGameId = selectedGameId,
                                 onOpenHandSettings = { showHandSettingsDialog = true },
-                                onToggleActionHand = { floatingHandsManager.showOrToggleUnifiedHand() }
+                                onToggleActionHand = { floatingHandsManager.showOrToggleUnifiedHand() },
+                                onResetProgression = { viewModel.resetStrategyProgression() }
                             )
 
                             TAB_RISK_MANAGER -> RiskManagerScreen(

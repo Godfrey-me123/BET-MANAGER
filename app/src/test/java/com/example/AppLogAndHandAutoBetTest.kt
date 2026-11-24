@@ -220,17 +220,6 @@ class AppLogAndHandAutoBetTest {
             it.level == AppLogLevel.SUCCESS && it.message == "BET gesture dispatched" && it.coordinates == (640f to 1280f)
         })
 
-        var cashOutOk: Boolean? = null
-        controller.clickCashOutTarget(fallbackX = 720f, fallbackY = 1320f) { cashOutOk = it }
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
-
-        assertEquals(true, cashOutOk)
-        assertEquals(2, controller.dispatchedGestures.size)
-        assertEquals(720f to 1320f, extractGestureStartXY(controller.dispatchedGestures[1]))
-        assertTrue(AppLogManager.logs.value.any {
-            it.level == AppLogLevel.SUCCESS && it.message == "CASH OUT gesture dispatched" && it.coordinates == (720f to 1320f)
-        })
-
         // Without hand coords and without active root, abort cleanly and log error
         var missingOk: Boolean? = null
         controller.clickBetTarget(fallbackX = null, fallbackY = null) { missingOk = it }
@@ -382,11 +371,7 @@ class AppLogAndHandAutoBetTest {
                 onComplete(true)
             }
 
-            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
-                cashOutClicks++
-                clickedCashOutCoords = fallbackX to fallbackY
-                onComplete(true)
-            }
+
 
             override fun refreshLiveTargets(fallbackTargets: DetectedUiTargets?): DetectedUiTargets? {
                 return when {

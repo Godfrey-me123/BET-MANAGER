@@ -214,13 +214,6 @@ class AviatorLayoutDetectionTest {
         assertEquals(SiteButtonState.CASH_OUT_AVAILABLE, scan.siteButtonState)
         assertEquals(betButtonRect, scan.cashOutButtonBounds)
         assertTrue(scan.isCashOutBtnClickable)
-
-        var clicked: Boolean? = null
-        controller.clickCashOutTarget { ok -> clicked = ok }
-        org.robolectric.shadows.ShadowLooper.idleMainLooper()
-
-        assertEquals(true, clicked)
-        assertEquals(1, controller.dispatchedGestures.size)
     }
 
     @Test
@@ -248,12 +241,6 @@ class AviatorLayoutDetectionTest {
         inertBetLabel.text = "Cash Out\n800.00 TZS"
         val cashScan = controller.scan(root)
         assertFalse(cashScan.isCashOutBtnClickable)
-
-        var cashOutClicked: Boolean? = null
-        controller.clickCashOutTarget { ok -> cashOutClicked = ok }
-        org.robolectric.shadows.ShadowLooper.idleMainLooper()
-        assertEquals(false, cashOutClicked)
-        assertEquals(0, controller.dispatchedGestures.size)
     }
 
     @Test

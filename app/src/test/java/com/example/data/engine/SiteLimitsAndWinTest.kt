@@ -1,9 +1,7 @@
 package com.example.data.engine
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SiteLimitsAndWinTest {
@@ -34,14 +32,6 @@ class SiteLimitsAndWinTest {
         val (min, max) = parseSiteStakeLimits(listOf("Min 500 Max 5"))
         assertNull(min)
         assertNull(max)
-    }
-
-    @Test
-    fun `game side auto cash out win needs armed flag and crash at or above target`() {
-        assertTrue(isGameSideCashOutWin(true, 2.50, 2.00))
-        assertTrue(isGameSideCashOutWin(true, 2.00, 2.00))
-        assertFalse(isGameSideCashOutWin(true, 1.40, 2.00))
-        assertFalse(isGameSideCashOutWin(false, 9.00, 2.00))
     }
 
     @Test

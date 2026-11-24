@@ -40,7 +40,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -164,68 +163,74 @@ fun LogsAnalyticsScreen(
     val isOverlayHost = LocalActivityResultRegistryOwner.current == null
     val hasBackOwner = LocalOnBackPressedDispatcherOwner.current != null
 
-    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-    @Composable
-    fun SectionSwitcherRow(modifier: Modifier = Modifier) {
+    val sectionSwitcher: @Composable () -> Unit = {
         Row(
-            modifier = modifier,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             FilterChip(
                 selected = sectionMode == LogsSectionMode.CRASH_HISTORY,
                 onClick = { sectionMode = LogsSectionMode.CRASH_HISTORY },
-                label = { Text(LogsSectionMode.CRASH_HISTORY.label, fontSize = 11.sp, maxLines = 1) },
-                modifier = Modifier.testTag("logs_section_crash_history")
+                label = { Text(LogsSectionMode.CRASH_HISTORY.label, fontSize = 12.sp) }
             )
             FilterChip(
                 selected = sectionMode == LogsSectionMode.APP_LOGS,
                 onClick = { sectionMode = LogsSectionMode.APP_LOGS },
-                label = { Text(LogsSectionMode.APP_LOGS.label, fontSize = 11.sp, maxLines = 1) },
-                modifier = Modifier.testTag("logs_section_app_logs")
+                label = { Text(LogsSectionMode.APP_LOGS.label, fontSize = 12.sp) }
             )
         }
     }
 
-    if (sectionMode == LogsSectionMode.APP_LOGS) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            SectionSwitcherRow(
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        if (sectionMode == LogsSectionMode.APP_LOGS) {
+            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+                sectionSwitcher()
+                DiagnosticLogsPanel(modifier = Modifier.fillMaxSize().weight(1f))
+            }
+        } else {
+            LazyColumn(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            )
-            DiagnosticLogsPanel(modifier = Modifier.fillMaxSize().weight(1f))
-        }
-    } else {
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                SectionSwitcherRow(modifier = Modifier.weight(1f))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onCollectHistory,
-                        modifier = Modifier.testTag("history_sync_btn")
-                    ) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Sync", tint = PrimaryCobalt)
-                    }
-                    IconButton(
-                        onClick = { showClearScopeDialog = true },
-                        modifier = Modifier.testTag("history_clear_scope_btn")
-                    ) {
-                        Icon(Icons.Default.Delete, contentDescription = "Clear History", tint = ActionStopRed)
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        sectionSwitcher()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "CRASH HISTORY",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = PrimaryCobalt
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = onCollectHistory,
+                                    modifier = Modifier.testTag("history_sync_btn")
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Sync", modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Sync", fontSize = 11.sp)
+                                }
+                                OutlinedButton(
+                                    onClick = { showClearScopeDialog = true },
+                                    modifier = Modifier.testTag("history_clear_scope_btn")
+                                ) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Clear History", tint = ActionStopRed, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Clear", fontSize = 11.sp, color = ActionStopRed)
+                                }
+                            }
+                        }
                     }
                 }
-            }
-        }
 
         // 3-Scope Session & Per-Game Isolation Filters
         item {

@@ -151,4 +151,5 @@ object ScreenColorSampler {
             isPixelVerified = true
         )
     }
+
 }

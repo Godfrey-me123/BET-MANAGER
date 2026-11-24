@@ -81,8 +81,7 @@ class EndToEndExecutionPipelineTest {
 
     private fun setupIsolatedControllerWithFakeInteractor(
         onApplyStake: (Double, StakeProgressionMode) -> Boolean = { _, _ -> true },
-        onClickBet: (Float?, Float?) -> Boolean = { _, _ -> true },
-        onClickCashOut: (Float?, Float?) -> Boolean = { _, _ -> true }
+        onClickBet: (Float?, Float?) -> Boolean = { _, _ -> true }
     ): Triple<Context, ScreenEarnerRepository, AutomationEngine> {
         val context = ApplicationProvider.getApplicationContext<Context>()
         SessionStateManager(context).clearSessionRuntimeState()
@@ -110,10 +109,6 @@ class EndToEndExecutionPipelineTest {
 
             override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
                 onComplete(onClickBet(fallbackX, fallbackY))
-            }
-
-            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
-                onComplete(onClickCashOut(fallbackX, fallbackY))
             }
         }
 
@@ -252,17 +247,13 @@ class EndToEndExecutionPipelineTest {
     }
 
     @Test
-    fun `balance detected as zero reports Insufficient balance and emits non-spammy notification`() = runBlocking {
+    fun `zero or unavailable balance does not block verified BET execution`() = runBlocking {
         val appliedStakes = mutableListOf<Double>()
         var betClicks = 0
         val (_, repo, engine) = setupIsolatedControllerWithFakeInteractor(
             onApplyStake = { stake, _ -> appliedStakes.add(stake); true },
             onClickBet = { _, _ -> betClicks++; true }
         )
-        val emittedNotifications = mutableListOf<Pair<StrategyNotificationType, String>>()
-        engine.onExecutionNotification = { type, _, msg, _, _ ->
-            emittedNotifications.add(type to msg)
-        }
 
         val config = StrategyConfig(
             isStrategy1Enabled = false,
@@ -270,8 +261,7 @@ class EndToEndExecutionPipelineTest {
             isHighMultiplierLossRuleEnabled = false,
             baseStake = 10.0,
             targetMultiplier = 2.00,
-            isAutoBetEnabled = true,
-            isAutoCashOutEnabled = true
+            isAutoBetEnabled = true
         ).withUpdatedRule(
             StrategyRuleConfig(ruleId = StrategyRuleId.AFTER_2_LOSSES, isEnabled = true, requiredLosses = 2)
         )
@@ -285,7 +275,7 @@ class EndToEndExecutionPipelineTest {
             listOf(FloatingShortcut(id = 1, label = "BET", type = ShortcutType.BET, targetPlatform = "BetPawa", targetX = 600f, targetY = 1190f, isCalibrated = true))
         )
 
-        // Baseline capture + two crashes < 2.0x to activate AFTER_2_LOSSES
+        // Baseline capture + two crashes < 2.0x to activate AFTER_2_LOSSES while balance reads 0.0
         AutomationController.processDetectionEvent(
             buildDetection("BETTING_OPEN", SiteButtonState.IDLE_READY_TO_BET, ribbon = listOf(3.00, 4.00, 5.00), balance = 0.0, roundId = "R-0", nowMs = 1_700_000_001_000L),
             isAccessibilityConnected = true,
@@ -302,12 +292,8 @@ class EndToEndExecutionPipelineTest {
             nowMs = 1_700_000_010_000L
         )
 
-        assertEquals(BalanceDetectionStatus.VERIFIED, engine.gameDetection.balanceState.value.status)
-        assertEquals(0.0, engine.resolveEffectiveBalance(), 0.001)
         assertTrue(engine.strategyEngine.getState().isBettingSessionActive)
-
-        // Direct RiskManager + resolveEffectiveBalance verification for DETECTED status as well
-        val detectedCheck = engine.riskManager.validateBetExecution(
+        val riskCheck = engine.riskManager.validateBetExecution(
             proposedStake = 10.0,
             currentSessionLoss = 0.0,
             currentRounds = 0,
@@ -315,41 +301,32 @@ class EndToEndExecutionPipelineTest {
             currentBalance = 0.0,
             limits = RiskLimits(),
             currentSessionProfit = 0.0,
-            balanceStatus = BalanceDetectionStatus.DETECTED
+            balanceStatus = BalanceDetectionStatus.UNAVAILABLE
         )
-        assertFalse(detectedCheck.isAllowed)
-        assertTrue(
-            "DETECTED balance 0.0 must report Insufficient balance, got: ${detectedCheck.violationReason}",
-            detectedCheck.violationReason.orEmpty().contains("Insufficient balance", ignoreCase = true)
-        )
+        assertTrue("Balance check must not block BET execution", riskCheck.isAllowed)
 
-        // Now BETTING_OPEN arrives with balance == 0.0 -> must NOT say "balance is unavailable", must say "Insufficient balance"
+        // Now BETTING_OPEN arrives with balance == 0.0 -> still prepares stake & places BET
         AutomationController.processDetectionEvent(
             buildDetection("BETTING_OPEN", SiteButtonState.IDLE_READY_TO_BET, ribbon = listOf(1.40, 1.15, 3.00, 4.00), balance = 0.0, roundId = "R-3", nowMs = 1_700_000_012_000L),
             isAccessibilityConnected = true,
             nowMs = 1_700_000_012_000L
         )
 
-        assertEquals(0, betClicks)
-        assertTrue(appliedStakes.isEmpty())
-        assertEquals(AutomationState.PAUSED, engine.automationState.value)
-        val violation = engine.lastRiskViolation.value.orEmpty()
-        assertTrue("Expected Insufficient balance message, got: $violation", violation.contains("Insufficient balance", ignoreCase = true))
-        assertEquals(1, emittedNotifications.count { it.first == StrategyNotificationType.MONITORING_ERROR })
+        assertEquals(1, betClicks)
+        assertEquals(listOf(10.0), appliedStakes)
+        assertEquals(AutomationState.RUNNING, engine.automationState.value)
     }
 
     @Test
-    fun `end to end detection triggers bet, cashout when autoCashOut enabled, and settles loss double and win reset`() = runBlocking {
+    fun `end to end detection triggers bet, leaves cashout to game, and settles loss double and win reset`() = runBlocking {
         val appliedStakes = mutableListOf<Pair<Double, StakeProgressionMode>>()
         var betClicks = 0
-        var cashOutClicks = 0
         val (_, repo, engine) = setupIsolatedControllerWithFakeInteractor(
             onApplyStake = { stake, mode ->
                 appliedStakes.add(stake to mode)
                 true
             },
-            onClickBet = { _, _ -> betClicks++; true },
-            onClickCashOut = { _, _ -> cashOutClicks++; true }
+            onClickBet = { _, _ -> betClicks++; true }
         )
         val executionNotices = mutableListOf<Pair<StrategyNotificationType, String>>()
         engine.onExecutionNotification = { type, title, _, _, _ ->
@@ -364,8 +341,7 @@ class EndToEndExecutionPipelineTest {
             lossProgressionMode = StakeProgressionMode.DOUBLE_AMOUNT,
             baseStake = 5.0,
             targetMultiplier = 2.00,
-            isAutoBetEnabled = true,
-            isAutoCashOutEnabled = true
+            isAutoBetEnabled = true
         ).withUpdatedRule(
             StrategyRuleConfig(
                 ruleId = StrategyRuleId.AFTER_2_LOSSES,
@@ -383,8 +359,7 @@ class EndToEndExecutionPipelineTest {
         AutomationController.startMonitoringSession(isAccessibilityConnected = true, nowMs = 1_700_000_000_000L)
         engine.updateCalibratedShortcuts(
             listOf(
-                FloatingShortcut(id = 1, label = "BP BET", type = ShortcutType.BET, targetPlatform = "BetPawa", targetX = 600f, targetY = 1190f, isCalibrated = true),
-                FloatingShortcut(id = 2, label = "BP CASHOUT", type = ShortcutType.CASH_OUT, targetPlatform = "BetPawa", targetX = 600f, targetY = 1190f, isCalibrated = true)
+                FloatingShortcut(id = 1, label = "BP BET", type = ShortcutType.BET, targetPlatform = "BetPawa", targetX = 600f, targetY = 1190f, isCalibrated = true)
             )
         )
 
@@ -427,7 +402,6 @@ class EndToEndExecutionPipelineTest {
             isAccessibilityConnected = true,
             nowMs = 1_700_000_012_000L
         )
-        assertEquals(0, cashOutClicks)
         AutomationController.processDetectionEvent(
             buildDetection("CRASHED", SiteButtonState.CRASHED, liveMult = 1.35, ribbon = listOf(1.35, 1.45, 1.20), balance = 995.0, roundId = "R-13", nowMs = 1_700_000_015_000L),
             isAccessibilityConnected = true,
@@ -446,15 +420,12 @@ class EndToEndExecutionPipelineTest {
         assertEquals(2, betClicks)
         assertEquals(10.0, appliedStakes.last().first, 0.001)
 
-        // 5. Round R-14 IN_FLIGHT hits 2.15x -> clicks CASH OUT once
+        // 5. Round R-14 flies to 2.15x and crashes at 2.80x -> game-side Auto Cash Out wins at 2.00x, profit = -5 + 10 = +5.0, stake resets to base 5.0
         AutomationController.processDetectionEvent(
             buildDetection("IN_FLIGHT", SiteButtonState.CASH_OUT_AVAILABLE, liveMult = 2.15, ribbon = listOf(1.35, 1.45, 1.20), balance = 985.0, roundId = "R-14", nowMs = 1_700_000_020_000L),
             isAccessibilityConnected = true,
             nowMs = 1_700_000_020_000L
         )
-        assertEquals(1, cashOutClicks)
-
-        // 6. Round R-14 crashes at 2.80x -> settles WIN, profit = -5 + 10 = +5.0, stake resets to base 5.0
         AutomationController.processDetectionEvent(
             buildDetection("CRASHED", SiteButtonState.CRASHED, liveMult = 2.80, ribbon = listOf(2.80, 1.35, 1.45), balance = 1005.0, roundId = "R-14", nowMs = 1_700_000_023_000L),
             isAccessibilityConnected = true,
@@ -470,7 +441,7 @@ class EndToEndExecutionPipelineTest {
         val logs = repo.sessionLogs.first()
         assertEquals(2, logs.size)
         assertTrue(executionNotices.any { it.first == StrategyNotificationType.AUTOMATION_ACTION && it.second.contains("Bet Placed") })
-        assertTrue(executionNotices.any { it.first == StrategyNotificationType.AUTOMATION_ACTION && it.second.contains("Cash Out Confirmed") })
+        assertTrue(executionNotices.any { it.first == StrategyNotificationType.AUTOMATION_ACTION && it.second.contains("Round Won") })
         // Routine balance/amount reads must NOT generate notification noise
         assertTrue(executionNotices.none { it.second.contains("Balance", ignoreCase = true) })
     }
@@ -551,12 +522,9 @@ class EndToEndExecutionPipelineTest {
     }
 
     @Test
-    fun `manual bet with auto cashout enabled does not fire below 1_20x on transient frames and cashes out at 2_00x`() = runBlocking {
-        var cashOutClicks = 0
+    fun `in-flight frames never trigger app-side cash out gestures or notifications`() = runBlocking {
         val requestedGestures = mutableListOf<String>()
-        val (_, repo, engine) = setupIsolatedControllerWithFakeInteractor(
-            onClickCashOut = { _, _ -> cashOutClicks++; true }
-        )
+        val (_, repo, engine) = setupIsolatedControllerWithFakeInteractor()
         engine.onGestureDispatchRequested = { _, _, label ->
             requestedGestures.add(label)
         }
@@ -569,7 +537,8 @@ class EndToEndExecutionPipelineTest {
             baseStake = 10.0,
             targetMultiplier = 2.00,
             isAutoBetEnabled = false,
-            isAutoCashOutEnabled = true
+            isAutoCashOutEnabled = true,
+            cashOutUntrackedBets = true
         )
         repo.saveStrategyConfig(config)
         repo.saveRiskLimits(RiskLimits())
@@ -577,47 +546,33 @@ class EndToEndExecutionPipelineTest {
 
         AutomationController.startMonitoringSession(isAccessibilityConnected = true, nowMs = 1_700_000_000_000L)
         engine.updateCalibratedShortcuts(
-            listOf(FloatingShortcut(id = 2, label = "CASH OUT HAND", type = ShortcutType.CASH_OUT, targetPlatform = "BetPawa", targetX = 720f, targetY = 1200f, targetMultiplier = 2.00, isCalibrated = true))
+            listOf(FloatingShortcut(id = 1, label = "BET HAND", type = ShortcutType.BET, targetPlatform = "BetPawa", targetX = 500f, targetY = 1200f, isCalibrated = true))
         )
 
-        // Prior round crashed at 3.50x so currentMultiplier in state would have been 3.50x if stale fallback existed;
-        // IN_FLIGHT with null liveMult + 1.15x must NEVER trigger cash-out at < 1.20x when target is 2.00x.
         AutomationController.processDetectionEvent(
             buildDetection("CRASHED", SiteButtonState.CRASHED, liveMult = 3.50, ribbon = listOf(3.50, 1.80), balance = 1000.0, roundId = "R-40", nowMs = 1_700_000_001_000L),
             isAccessibilityConnected = true,
             nowMs = 1_700_000_001_000L
         )
         AutomationController.processDetectionEvent(
-            buildDetection("IN_FLIGHT", SiteButtonState.IDLE_READY_TO_BET, liveMult = null, ribbon = listOf(3.50, 1.80), balance = 990.0, roundId = "R-41", nowMs = 1_700_000_003_000L),
-            isAccessibilityConnected = true,
-            nowMs = 1_700_000_003_000L
-        )
-        AutomationController.processDetectionEvent(
             buildDetection("IN_FLIGHT", SiteButtonState.CASH_OUT_AVAILABLE, liveMult = 1.15, ribbon = listOf(3.50, 1.80), balance = 990.0, roundId = "R-41", nowMs = 1_700_000_004_000L),
             isAccessibilityConnected = true,
             nowMs = 1_700_000_004_000L
         )
-        assertEquals(0, cashOutClicks)
-
-        // Reaches 2.02x with manual bet's CASH_OUT_AVAILABLE visible -> cashes out and notifies
         AutomationController.processDetectionEvent(
-            buildDetection("IN_FLIGHT", SiteButtonState.CASH_OUT_AVAILABLE, liveMult = 2.02, ribbon = listOf(3.50, 1.80), balance = 990.0, roundId = "R-41", nowMs = 1_700_000_007_000L),
+            buildDetection("IN_FLIGHT", SiteButtonState.CASH_OUT_AVAILABLE, liveMult = 2.50, ribbon = listOf(3.50, 1.80), balance = 990.0, roundId = "R-41", nowMs = 1_700_000_007_000L),
             isAccessibilityConnected = true,
             nowMs = 1_700_000_007_000L
         )
-        assertEquals(1, cashOutClicks)
-        assertTrue(requestedGestures.contains("CASH OUT"))
-        assertTrue(notices.any { it.second.contains("Waiting for Cash Out", ignoreCase = true) })
-        assertTrue(notices.any { it.second.contains("Cashing Out", ignoreCase = true) })
-        assertTrue(notices.any { it.second.contains("Cash Out Confirmed", ignoreCase = true) })
+        assertTrue(requestedGestures.none { it.contains("CASH", ignoreCase = true) })
+        assertTrue(notices.none { it.second.contains("Cash Out", ignoreCase = true) })
     }
 
     @Test
     fun `emits full action lifecycle notifications from waiting to bet through round settlement`() = runBlocking {
         val (_, repo, engine) = setupIsolatedControllerWithFakeInteractor(
             onApplyStake = { _, _ -> true },
-            onClickBet = { _, _ -> true },
-            onClickCashOut = { _, _ -> true }
+            onClickBet = { _, _ -> true }
         )
         val actionTitles = mutableListOf<String>()
         engine.onExecutionNotification = { type, title, _, _, _ ->
@@ -632,8 +587,7 @@ class EndToEndExecutionPipelineTest {
             isHighMultiplierLossRuleEnabled = false,
             baseStake = 5.0,
             targetMultiplier = 2.00,
-            isAutoBetEnabled = true,
-            isAutoCashOutEnabled = true
+            isAutoBetEnabled = true
         ).withUpdatedRule(
             StrategyRuleConfig(
                 ruleId = StrategyRuleId.AFTER_3_LOSSES,
@@ -650,8 +604,7 @@ class EndToEndExecutionPipelineTest {
         AutomationController.startMonitoringSession(isAccessibilityConnected = true, nowMs = 1_700_000_000_000L)
         engine.updateCalibratedShortcuts(
             listOf(
-                FloatingShortcut(id = 1, label = "BET HAND", type = ShortcutType.BET, targetPlatform = "BetPawa", targetX = 500f, targetY = 1200f, isCalibrated = true),
-                FloatingShortcut(id = 2, label = "CASH OUT HAND", type = ShortcutType.CASH_OUT, targetPlatform = "BetPawa", targetX = 720f, targetY = 1200f, targetMultiplier = 2.00, isCalibrated = true)
+                FloatingShortcut(id = 1, label = "BET HAND", type = ShortcutType.BET, targetPlatform = "BetPawa", targetX = 500f, targetY = 1200f, isCalibrated = true)
             )
         )
 
@@ -681,7 +634,6 @@ class EndToEndExecutionPipelineTest {
             isAccessibilityConnected = true,
             nowMs = 1_700_000_015_000L
         )
-        // Transient IN_FLIGHT frame with IDLE_READY_TO_BET must NOT prematurely settle before CASH_OUT_AVAILABLE appears
         AutomationController.processDetectionEvent(
             buildDetection("IN_FLIGHT", SiteButtonState.IDLE_READY_TO_BET, liveMult = 1.05, ribbon = listOf(1.40, 1.25, 1.10), balance = 995.0, roundId = "R-54", nowMs = 1_700_000_016_000L),
             isAccessibilityConnected = true,
@@ -701,10 +653,8 @@ class EndToEndExecutionPipelineTest {
         assertTrue(actionTitles.any { it.contains("Waiting to Bet", ignoreCase = true) })
         assertTrue(actionTitles.any { it.contains("Placing Bet", ignoreCase = true) })
         assertTrue(actionTitles.any { it.contains("Bet Placed", ignoreCase = true) })
-        assertTrue(actionTitles.any { it.contains("Waiting for Cash Out", ignoreCase = true) })
-        assertTrue(actionTitles.any { it.contains("Cashing Out", ignoreCase = true) })
-        assertTrue(actionTitles.any { it.contains("Cash Out Confirmed", ignoreCase = true) })
         assertTrue(actionTitles.any { it.contains("Round Won", ignoreCase = true) })
+        assertTrue(actionTitles.none { it.contains("Cash Out", ignoreCase = true) })
         assertTrue(actionTitles.none { it.contains("Balance", ignoreCase = true) })
     }
 }

@@ -62,9 +62,28 @@ data class StrategyState(
     val enabledRuleIds: Set<StrategyRuleId> = StrategyRuleId.entries.filter { it.defaultEnabled }.toSet()
 )
 
+data class StrategyProgressionSnapshot(
+    val consecutiveLowCount: Int = 0,
+    val consecutiveObservedLosses: Int = 0,
+    val postHighWaitCount: Int = 0,
+    val lastHighMultiplier: Double = 0.0,
+    val isWaitingForPostHigh: Boolean = false,
+    val activeRuleIdName: String? = null,
+    val activeRuleLabel: String? = null,
+    val targetWinsToFetch: Int = 2,
+    val pendingWaitRuleIdName: String? = null,
+    val pendingWaitRuleLabel: String? = null,
+    val waitUntilTimestamp: Long = 0L,
+    val isBettingSessionActive: Boolean = false,
+    val sessionStartedTimestamp: Long = 0L,
+    val currentStakeLevel: Int = 1,
+    val consecutiveWinsInSession: Int = 0,
+    val consecutiveLossesInSession: Int = 0,
+    val currentCalculatedStake: Double = 10.0
+)
+
 enum class ActionType {
-    BET,
-    CASH_OUT
+    BET
 }
 
 data class AutomationActionEvent(
@@ -171,9 +190,15 @@ class StrategyEngine {
             .map { it.ruleId }
             .toSet()
 
-        val shouldClearPendingWait = state.pendingWaitRuleId != null && state.pendingWaitRuleId !in enabledIds
-        val updatedStake = if (!state.isBettingSessionActive) roundStake(config.baseStake) else state.currentCalculatedStake
         val (masterMode, masterAddAmount) = resolveEffectiveProgression(config)
+        val shouldClearPendingWait = state.pendingWaitRuleId != null && state.pendingWaitRuleId !in enabledIds
+        val hasActiveProgression = state.isBettingSessionActive || state.currentStakeLevel > 1
+        val rawUpdatedStake = if (!hasActiveProgression) roundStake(config.baseStake) else state.currentCalculatedStake
+        val updatedStake = if (config.maxStake > 0.0) {
+            rawUpdatedStake.coerceAtMost(roundStake(config.maxStake))
+        } else {
+            rawUpdatedStake
+        }
 
         state = state.copy(
             enabledRuleIds = enabledIds,
@@ -186,7 +211,7 @@ class StrategyEngine {
             currentCalculatedStake = updatedStake
         )
 
-        if (!state.isBettingSessionActive) {
+        if (!hasActiveProgression) {
             publishStakeInstruction(
                 stake = updatedStake,
                 mode = masterMode,
@@ -196,8 +221,100 @@ class StrategyEngine {
                 isSessionActive = false,
                 reason = if (enabledIds.isEmpty()) "No Recovery Rule Selected" else "${enabledIds.size} Rules Bound"
             )
+        } else {
+            publishStakeInstruction(
+                stake = updatedStake,
+                mode = masterMode,
+                addAmount = masterAddAmount,
+                targetMultiplier = config.targetMultiplier,
+                stakeLevel = state.currentStakeLevel,
+                isSessionActive = state.isBettingSessionActive,
+                reason = "Progression Preserved (Level ${state.currentStakeLevel})"
+            )
         }
         safeLogI("Bound ${enabledIds.size} strategy rules to StrategyEngine: $enabledIds (progression=$masterMode)")
+    }
+
+    fun exportProgressionSnapshot(): StrategyProgressionSnapshot {
+        return StrategyProgressionSnapshot(
+            consecutiveLowCount = state.consecutiveLowCount,
+            consecutiveObservedLosses = state.consecutiveObservedLosses,
+            postHighWaitCount = state.postHighWaitCount,
+            lastHighMultiplier = state.lastHighMultiplier,
+            isWaitingForPostHigh = state.isWaitingForPostHigh,
+            activeRuleIdName = state.activeRuleId?.name,
+            activeRuleLabel = state.activeRuleLabel,
+            targetWinsToFetch = state.targetWinsToFetch,
+            pendingWaitRuleIdName = state.pendingWaitRuleId?.name,
+            pendingWaitRuleLabel = state.pendingWaitRuleLabel,
+            waitUntilTimestamp = state.waitUntilTimestamp,
+            isBettingSessionActive = state.isBettingSessionActive,
+            sessionStartedTimestamp = state.sessionStartedTimestamp,
+            currentStakeLevel = state.currentStakeLevel,
+            consecutiveWinsInSession = state.consecutiveWinsInSession,
+            consecutiveLossesInSession = state.consecutiveLossesInSession,
+            currentCalculatedStake = state.currentCalculatedStake
+        )
+    }
+
+    fun restoreProgressionSnapshot(snapshot: StrategyProgressionSnapshot, config: StrategyConfig = _boundConfig.value) {
+        _boundConfig.value = config
+        val enabledIds = config.getRuleConfigs()
+            .filter { it.isEnabled }
+            .map { it.ruleId }
+            .toSet()
+        val (masterMode, masterAddAmount) = resolveEffectiveProgression(config)
+        val restoredActiveRule = snapshot.activeRuleIdName?.let { name ->
+            runCatching { StrategyRuleId.valueOf(name) }.getOrNull()
+        }
+        val restoredPendingRule = snapshot.pendingWaitRuleIdName?.let { name ->
+            runCatching { StrategyRuleId.valueOf(name) }.getOrNull()
+        }
+        val baseOrRestored = if (snapshot.isBettingSessionActive || snapshot.currentStakeLevel > 1) {
+            roundStake(snapshot.currentCalculatedStake)
+        } else {
+            roundStake(config.baseStake)
+        }
+        val cappedStake = if (config.maxStake > 0.0) {
+            baseOrRestored.coerceAtMost(roundStake(config.maxStake))
+        } else {
+            baseOrRestored
+        }
+        state = state.copy(
+            consecutiveLowCount = snapshot.consecutiveLowCount.coerceAtLeast(0),
+            consecutiveObservedLosses = snapshot.consecutiveObservedLosses.coerceAtLeast(0),
+            postHighWaitCount = snapshot.postHighWaitCount.coerceAtLeast(0),
+            lastHighMultiplier = snapshot.lastHighMultiplier.coerceAtLeast(0.0),
+            isWaitingForPostHigh = snapshot.isWaitingForPostHigh,
+            activeRuleId = restoredActiveRule,
+            activeRuleLabel = snapshot.activeRuleLabel,
+            activeProgressionMode = masterMode,
+            activeCustomAddAmount = masterAddAmount,
+            targetWinsToFetch = snapshot.targetWinsToFetch.coerceAtLeast(1),
+            pendingWaitRuleId = restoredPendingRule,
+            pendingWaitRuleLabel = snapshot.pendingWaitRuleLabel,
+            waitUntilTimestamp = snapshot.waitUntilTimestamp.coerceAtLeast(0L),
+            isBettingSessionActive = snapshot.isBettingSessionActive,
+            sessionStartedTimestamp = snapshot.sessionStartedTimestamp.coerceAtLeast(0L),
+            currentStakeLevel = snapshot.currentStakeLevel.coerceAtLeast(1),
+            consecutiveWinsInSession = snapshot.consecutiveWinsInSession.coerceAtLeast(0),
+            consecutiveLossesInSession = snapshot.consecutiveLossesInSession.coerceAtLeast(0),
+            currentCalculatedStake = cappedStake,
+            enabledRuleIds = enabledIds
+        )
+        publishStakeInstruction(
+            stake = cappedStake,
+            mode = masterMode,
+            addAmount = masterAddAmount,
+            targetMultiplier = config.targetMultiplier,
+            stakeLevel = state.currentStakeLevel,
+            isSessionActive = state.isBettingSessionActive,
+            reason = if (state.isBettingSessionActive) {
+                "Restored Progression Level ${state.currentStakeLevel}"
+            } else {
+                "Restored Base Stake"
+            }
+        )
     }
 
     fun updateStrategySelection(
@@ -229,7 +346,8 @@ class StrategyEngine {
         progressionMode: StakeProgressionMode,
         customAddAmount: Double,
         lossMultiplier: Double = 0.0,
-        isHighMultiplierLossRuleEnabled: Boolean = false
+        isHighMultiplierLossRuleEnabled: Boolean = false,
+        maxStake: Double = 0.0
     ): Double {
         val safeCurrent = currentStake.coerceAtLeast(0.0)
         val rawNext = when (progressionMode) {
@@ -237,7 +355,12 @@ class StrategyEngine {
             StakeProgressionMode.ADD_AMOUNT -> safeCurrent + customAddAmount.coerceAtLeast(0.0)
             StakeProgressionMode.DOUBLE_AMOUNT -> safeCurrent * 2.0
         }
-        return roundStake(rawNext)
+        val rounded = roundStake(rawNext)
+        return if (maxStake > 0.0) {
+            rounded.coerceAtMost(roundStake(maxStake))
+        } else {
+            rounded
+        }
     }
 
     private fun publishStakeInstruction(
@@ -757,14 +880,6 @@ class StrategyEngine {
             totalWins++
             val wins = state.consecutiveWinsInSession + 1
             safeLogI("Bet Won! Verified wins in recovery session: $wins / $targetWins")
-            triggerAction(
-                AutomationActionEvent(
-                    actionType = ActionType.CASH_OUT,
-                    amountOrMultiplier = multiplier,
-                    reason = "Auto Cashout Won ($wins/$targetWins) @ ${String.format(Locale.US, "%.2f", multiplier)}x",
-                    timestamp = currentTimeMs
-                )
-            )
 
             val resetBase = roundStake(config.baseStake)
             val shouldResetOnWin = (config.isMartingaleEnabled && activeMode != StakeProgressionMode.DISABLED) ||
@@ -820,12 +935,14 @@ class StrategyEngine {
             val losses = state.consecutiveLossesInSession + 1
 
             // Strictly obey master progression setting (DISABLED stays flat regardless of Martingale or rule mode)
+            // and cap progression by config.maxStake when configured (> 0.0).
             val nextStake = calculateNextStakeAfterLoss(
                 currentStake = state.currentCalculatedStake,
                 progressionMode = activeMode,
                 customAddAmount = activeAddAmount,
                 lossMultiplier = multiplier,
-                isHighMultiplierLossRuleEnabled = false
+                isHighMultiplierLossRuleEnabled = false,
+                maxStake = config.maxStake
             )
 
             safeLogI("Bet Lost. Session losses: $losses, masterMode: $activeMode, martingale: ${config.isMartingaleEnabled}, next stake: $nextStake")

@@ -45,18 +45,18 @@ enum class UnifiedHandVisualState(
     val isActionable: Boolean
 ) {
     BET_READY("BET\nTAP", "#16A34A", "#DCFCE7", true),
-    CASH_OUT_READY("CASH\nOUT", "#EA580C", "#FFEDD5", true),
-    BET_QUEUED_LOCKED("QUEUED\nWAIT", "#475569", "#CBD5E1", false),
+    BET_QUEUED_LOCKED("BET\nLOCKED", "#475569", "#CBD5E1", false),
     BLOCKED_CONFLICT("LOCKED\nCHECK", "#DC2626", "#FEE2E2", false),
     WAIT_IDLE("WAIT\nREADY", "#334155", "#E2E8F0", false)
 }
 
 /**
- * Manages the single unified draggable floating action hand for Predict Manager.
+ * Manages the single draggable BET floating action hand for Predict Manager.
  * - Label, color, and action adapt automatically from verified Accessibility + OCR state:
- *   BET when waiting to place a bet; CASH OUT only when an active bet exists and Cash Out is available.
- * - Single tap performs the displayed action when manual operation is selected.
- * - Double-tap or long-press opens the Dedicated Hand Settings overlay without firing a bet/cash-out.
+ *   ready for BET when the betting window is open, locked immediately once a bet is placed
+ *   until the current round settles and the next eligible betting window opens.
+ * - Single tap places the configured BET when BET_READY.
+ * - Double-tap or long-press opens the Dedicated Hand Settings overlay without firing a bet.
  * - Dragging repositions the hand cleanly without triggering accidental actions.
  */
 class FloatingHandsOverlayManager(
@@ -93,8 +93,9 @@ class FloatingHandsOverlayManager(
         }
 
         /**
-         * Resolves the unified hand's visual state & valid action strictly from verified live state.
-         * Never exposes BET or CASH OUT when unsafe, conflicting, or invalid for the current round phase.
+         * Resolves the BET hand's visual state & valid action strictly from verified live state.
+         * Locks immediately once a bet is placed (`BET_QUEUED_LOCKED`) and stays locked through
+         * takeoff/in-flight until the current round settles and unlocks the next betting window.
          */
         fun resolveUnifiedHandVisualState(
             detection: GameDetectionState,
@@ -109,34 +110,20 @@ class FloatingHandsOverlayManager(
             if (!detection.isGameDetected || detection.liveDetectionLost) {
                 return UnifiedHandVisualState.WAIT_IDLE
             }
+            if (isRoundBetActive || btnState == SiteButtonState.BET_QUEUED || targets.isCancelBtnDetected) {
+                return UnifiedHandVisualState.BET_QUEUED_LOCKED
+            }
             if (hasConflict) {
                 return UnifiedHandVisualState.BLOCKED_CONFLICT
             }
 
-            if (isRoundBetActive &&
-                (phase == "IN_FLIGHT" || btnState == SiteButtonState.CASH_OUT_AVAILABLE) &&
-                btnState == SiteButtonState.CASH_OUT_AVAILABLE &&
-                targets.isCashOutBtnDetected &&
-                targets.isCashOutBtnEnabled &&
-                targets.detectCashOutCollisionReason() == null
-            ) {
-                return UnifiedHandVisualState.CASH_OUT_READY
-            }
-
-            if (!isRoundBetActive &&
-                (phase == "BETTING_OPEN" || btnState == SiteButtonState.IDLE_READY_TO_BET) &&
+            if ((phase == "BETTING_OPEN" || btnState == SiteButtonState.IDLE_READY_TO_BET) &&
                 btnState == SiteButtonState.IDLE_READY_TO_BET &&
                 targets.isBetBtnDetected &&
                 targets.isBetBtnEnabled &&
                 targets.detectBetCollisionReason() == null
             ) {
                 return UnifiedHandVisualState.BET_READY
-            }
-
-            if ((isRoundBetActive || btnState == SiteButtonState.BET_QUEUED || targets.isCancelBtnDetected) &&
-                phase == "BETTING_OPEN"
-            ) {
-                return UnifiedHandVisualState.BET_QUEUED_LOCKED
             }
 
             return UnifiedHandVisualState.WAIT_IDLE
@@ -254,13 +241,13 @@ class FloatingHandsOverlayManager(
                 startStateObserver()
                 Toast.makeText(
                     context,
-                    "Action Hand active · Tap to act, Double-tap or Long-press for Hand Settings",
+                    "BET Hand active · Tap to place BET, Double-tap or Long-press for Hand Settings",
                     Toast.LENGTH_SHORT
                 ).show()
             }.onFailure { err ->
                 Toast.makeText(
                     context,
-                    "Could not show Action Hand overlay: ${err.message ?: "permission required"}",
+                    "Could not show BET Hand overlay: ${err.message ?: "permission required"}",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -268,7 +255,7 @@ class FloatingHandsOverlayManager(
     }
 
     /**
-     * Backward-compatible delegate so any caller invokes the single Unified Action Hand.
+     * Backward-compatible delegate invoking the single BET Action Hand.
      */
     fun showOrToggleHand(
         type: ShortcutType = ShortcutType.BET,
@@ -317,7 +304,6 @@ class FloatingHandsOverlayManager(
         }
         val modeHint = when (visual) {
             UnifiedHandVisualState.BET_READY -> if (config.isAutoBetEnabled) "BET\nAUTO" else "BET\nTAP"
-            UnifiedHandVisualState.CASH_OUT_READY -> if (config.isAutoCashOutEnabled) "CASH\nAUTO" else "CASH\nOUT"
             else -> visual.shortLabel
         }
         view.background = bg
@@ -399,7 +385,7 @@ class FloatingHandsOverlayManager(
             gravity = Gravity.CENTER
             background = bg
             elevation = 14f
-            contentDescription = "Unified Action Hand"
+            contentDescription = "Floating BET Action Hand"
         }
     }
 
@@ -525,17 +511,9 @@ class FloatingHandsOverlayManager(
     private fun executeCurrentSingleTapAction() {
         val config = latestConfigSnapshot
         val limits = latestLimitsSnapshot
-        when (val visual = latestVisualState) {
+        when (latestVisualState) {
             UnifiedHandVisualState.BET_READY -> {
                 automationEngine.executeVerifiedManualBet(config, limits) { _, msg ->
-                    mainHandler.post {
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-
-            UnifiedHandVisualState.CASH_OUT_READY -> {
-                automationEngine.executeVerifiedManualCashOut(config, limits) { _, msg ->
                     mainHandler.post {
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                     }
@@ -545,7 +523,7 @@ class FloatingHandsOverlayManager(
             UnifiedHandVisualState.BET_QUEUED_LOCKED -> {
                 Toast.makeText(
                     context,
-                    "Bet already queued — waiting for round takeoff.",
+                    "Bet placed — locked until current round settles.",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -561,7 +539,7 @@ class FloatingHandsOverlayManager(
             UnifiedHandVisualState.WAIT_IDLE -> {
                 Toast.makeText(
                     context,
-                    "No valid BET or CASH OUT action available right now. Double-tap for Hand Settings.",
+                    "BET unavailable right now. Double-tap for Hand Settings.",
                     Toast.LENGTH_SHORT
                 ).show()
             }

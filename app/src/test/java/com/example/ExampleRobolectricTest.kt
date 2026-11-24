@@ -50,10 +50,10 @@ class ExampleRobolectricTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun `read Predict Manager app name from context`() {
+    fun `read BetManager app name from context`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("Predict Manager", appName)
+        assertEquals("BetManager", appName)
     }
 
     @Test

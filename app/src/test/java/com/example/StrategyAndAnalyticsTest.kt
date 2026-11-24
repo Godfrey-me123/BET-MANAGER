@@ -689,10 +689,6 @@ class StrategyAndAnalyticsTest {
                 betClickCount++
                 onComplete(true)
             }
-
-            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
-                onComplete(true)
-            }
         }
 
         val strategyEngine = StrategyEngine()
@@ -971,10 +967,6 @@ class StrategyAndAnalyticsTest {
                 betClickCoords.add(fallbackX to fallbackY)
                 onComplete(true)
             }
-
-            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
-                onComplete(true)
-            }
         }
 
         val engine = AutomationEngine(
@@ -1126,11 +1118,6 @@ class StrategyAndAnalyticsTest {
                 onComplete(true)
             }
 
-            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
-                cashOutClicks++
-                onComplete(true)
-            }
-
             override fun cancelPendingGestures(reason: String) {
                 cancelReasons.add(reason)
             }
@@ -1145,8 +1132,7 @@ class StrategyAndAnalyticsTest {
         )
         engine.updateCalibratedShortcuts(
             listOf(
-                FloatingShortcut(id = 1, label = "BET", type = ShortcutType.BET, targetX = 300f, targetY = 1200f, isCalibrated = true),
-                FloatingShortcut(id = 2, label = "CASH", type = ShortcutType.CASH_OUT, targetX = 600f, targetY = 1200f, isCalibrated = true)
+                FloatingShortcut(id = 1, label = "BET", type = ShortcutType.BET, targetX = 300f, targetY = 1200f, isCalibrated = true)
             )
         )
 
@@ -1194,7 +1180,7 @@ class StrategyAndAnalyticsTest {
         val clicksAtHalt = betClicks
         // Subsequent phases must NOT dispatch any more automation gestures
         engine.handlePhaseUpdate("BETTING_OPEN", 1.0, config, limits, currentTimeMs = 6_000L)
-        engine.evaluateInFlightMultiplier(3.0, config, limits = limits)
+        engine.handlePhaseUpdate("IN_FLIGHT", 3.0, config, limits, currentTimeMs = 7_000L)
         assertEquals(clicksAtHalt, betClicks)
         assertEquals(0, cashOutClicks)
     }
@@ -1299,10 +1285,6 @@ class StrategyAndAnalyticsTest {
 
             override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
                 betClicks++
-                onComplete(true)
-            }
-
-            override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
                 onComplete(true)
             }
 

@@ -125,7 +125,6 @@ fun OverlaySettingsPanelComposable(
     onExpandFullScreen: () -> Unit = {},
     onClose: () -> Unit = {},
     onToggleBetHand: (() -> Unit)? = null,
-    onToggleCashOutHand: (() -> Unit)? = null,
     onToggleActionHand: (() -> Unit)? = null,
     onOpenHandSettings: (() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -139,18 +138,6 @@ fun OverlaySettingsPanelComposable(
     }
     var targetMultText by remember(strategyConfig.targetMultiplier) {
         mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.targetMultiplier))
-    }
-    var gameAutoCashTargetText by remember(strategyConfig.gameAutoCashOutTarget) {
-        mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.gameAutoCashOutTarget))
-    }
-    var minStakeText by remember(strategyConfig.minStake) {
-        mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.minStake))
-    }
-    var maxStakeText by remember(strategyConfig.maxStake) {
-        mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.maxStake))
-    }
-    var minFlightTimeText by remember(strategyConfig.minFlightTimeBeforeCashOutMs) {
-        mutableStateOf(strategyConfig.minFlightTimeBeforeCashOutMs.toString())
     }
     var lowThreshText by remember(strategyConfig.lowThreshold) {
         mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.lowThreshold))
@@ -377,9 +364,9 @@ fun OverlaySettingsPanelComposable(
                     }
                 }
 
-                // 1. Unified Hand Execution (Separated BET & CASH OUT Controls)
+                // 1. BET Automation & Hand Execution Controls
                 OverlaySettingsSectionCard(
-                    title = "BET & CASH OUT CONTROLS",
+                    title = "BET AUTOMATION & TARGET CONTROLS",
                     icon = Icons.Default.PlayArrow,
                     modifier = Modifier.testTag("overlay_settings_auto_bet_card")
                 ) {
@@ -402,7 +389,7 @@ fun OverlaySettingsPanelComposable(
                                 color = if (localConfig.isAutoBetEnabled) ActionStartEmerald else MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = "When OFF, tap the Unified Action Hand to place a verified bet manually.",
+                                text = "When OFF, tap the Floating BET Hand to place a verified bet manually.",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -430,6 +417,22 @@ fun OverlaySettingsPanelComposable(
                             .testTag("overlay_settings_base_stake_input")
                     )
 
+                    OutlinedTextField(
+                        value = targetMultText,
+                        onValueChange = { raw ->
+                            targetMultText = raw
+                            raw.toDoubleOrNull()?.let { v ->
+                                if (v >= 1.01) pushConfig(localConfig.copy(targetMultiplier = v))
+                            }
+                        },
+                        label = { Text("Win Target Multiplier (x) — game handles Cash Out", fontSize = 11.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("overlay_settings_target_multiplier_input")
+                    )
+
                     OverlayToggleRow(
                         label = "Verify Stake Input Read-Back",
                         checked = localConfig.verifyStakeReadBack,
@@ -442,144 +445,6 @@ fun OverlaySettingsPanelComposable(
                         testTag = "overlay_settings_dismiss_keyboard_switch",
                         onCheckedChange = { pushConfig(localConfig.copy(dismissKeyboardBeforeBet = it)) }
                     )
-                    OverlayToggleRow(
-                        label = "Configure Game-Side Auto Cash Out",
-                        checked = localConfig.gameAutoCashOutEnabled,
-                        testTag = "overlay_settings_game_auto_cashout_switch",
-                        onCheckedChange = { pushConfig(localConfig.copy(gameAutoCashOutEnabled = it)) }
-                    )
-                    if (localConfig.gameAutoCashOutEnabled) {
-                        OutlinedTextField(
-                            value = gameAutoCashTargetText,
-                            onValueChange = { raw ->
-                                gameAutoCashTargetText = raw
-                                raw.toDoubleOrNull()?.let { v ->
-                                    if (v >= 1.01) pushConfig(localConfig.copy(gameAutoCashOutTarget = v))
-                                }
-                            },
-                            label = { Text("Game Auto Cash Out Target (e.g. 2.00x)", fontSize = 11.sp) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("overlay_settings_game_auto_cashout_target_input")
-                        )
-                        Text("Auto Cash Out Mode", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            listOf("OFF", "ENSURE", "SKIP_IF_ALREADY_SET").forEach { m ->
-                                FilterChip(
-                                    selected = localConfig.gameAutoCashOutMode == m,
-                                    onClick = { pushConfig(localConfig.copy(gameAutoCashOutMode = m)) },
-                                    label = { Text(m, fontSize = 9.sp) },
-                                    modifier = Modifier.testTag("overlay_settings_autocash_mode_$m")
-                                )
-                            }
-                        }
-                    }
-                    OverlayToggleRow(
-                        label = "Also cash out bets I placed by hand",
-                        checked = localConfig.cashOutUntrackedBets,
-                        testTag = "overlay_settings_cashout_untracked_switch",
-                        onCheckedChange = { pushConfig(localConfig.copy(cashOutUntrackedBets = it)) }
-                    )
-                    OverlayToggleRow(
-                        label = "Allow betting while the plane is flying (queues next round)",
-                        checked = localConfig.queueBetDuringFlight,
-                        testTag = "overlay_settings_queue_bet_switch",
-                        onCheckedChange = { pushConfig(localConfig.copy(queueBetDuringFlight = it)) }
-                    )
-                    OutlinedTextField(
-                        value = minStakeText,
-                        onValueChange = { raw ->
-                            minStakeText = raw
-                            raw.toDoubleOrNull()?.takeIf { it >= 0.0 }?.let { v -> pushConfig(localConfig.copy(minStake = v)) }
-                        },
-                        label = { Text("Min stake (0 = no limit)", fontSize = 11.sp) },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("overlay_settings_min_stake_input")
-                    )
-                    OutlinedTextField(
-                        value = maxStakeText,
-                        onValueChange = { raw ->
-                            maxStakeText = raw
-                            raw.toDoubleOrNull()?.takeIf { it >= 0.0 }?.let { v -> pushConfig(localConfig.copy(maxStake = v)) }
-                        },
-                        label = { Text("Max stake (0 = no limit)", fontSize = 11.sp) },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("overlay_settings_max_stake_input")
-                    )
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
-
-                    Text(
-                        text = "CASH OUT SETTINGS",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = PrimaryCobalt
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (localConfig.isAutoCashOutEnabled) "Auto Cash Out: AUTOMATIC" else "Auto Cash Out: MANUAL TAP",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                color = if (localConfig.isAutoCashOutEnabled) ActionStartEmerald else MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "Independent from Auto-Bet. Controls automatic Cash Out at target multiplier.",
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = localConfig.isAutoCashOutEnabled,
-                            onCheckedChange = { pushConfig(localConfig.copy(isAutoCashOutEnabled = it)) },
-                            modifier = Modifier.testTag("overlay_settings_auto_cash_out_switch")
-                        )
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = targetMultText,
-                            onValueChange = { raw ->
-                                targetMultText = raw
-                                raw.toDoubleOrNull()?.let { v ->
-                                    if (v >= 1.01) pushConfig(localConfig.copy(targetMultiplier = v))
-                                }
-                            },
-                            label = { Text("Target Multiplier (e.g. 2.00x)", fontSize = 11.sp) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("overlay_settings_target_multiplier_input")
-                        )
-                        OutlinedTextField(
-                            value = minFlightTimeText,
-                            onValueChange = { raw ->
-                                minFlightTimeText = raw
-                                raw.toLongOrNull()?.let { v ->
-                                    if (v in 0L..60_000L) pushConfig(localConfig.copy(minFlightTimeBeforeCashOutMs = v))
-                                }
-                            },
-                            label = { Text("Min Flight (ms)", fontSize = 11.sp) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("overlay_settings_min_flight_input")
-                        )
-                    }
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
 
@@ -615,7 +480,7 @@ fun OverlaySettingsPanelComposable(
                                 ) {
                                     Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("ACTION HAND", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("BET HAND", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                 }
                             }
                             if (onOpenHandSettings != null) {
@@ -961,8 +826,6 @@ fun OverlaySettingsPanelComposable(
                     onClick = {
                         val parsedStake = baseStakeText.trim().toDoubleOrNull()
                         val parsedTarget = targetMultText.trim().toDoubleOrNull()
-                        val parsedGameAutoTarget = gameAutoCashTargetText.trim().toDoubleOrNull()
-                        val parsedMinFlight = minFlightTimeText.trim().toLongOrNull()
                         val parsedLow = lowThreshText.trim().toDoubleOrNull()
                         val parsedBoundary = boundaryText.trim().toDoubleOrNull()
                         val parsedBig = bigThreshText.trim().toDoubleOrNull()
@@ -973,9 +836,6 @@ fun OverlaySettingsPanelComposable(
 
                         val stakeInvalid = parsedStake == null || !parsedStake.isFinite() || parsedStake < 1.0
                         val targetInvalid = parsedTarget == null || !parsedTarget.isFinite() || parsedTarget < 1.01
-                        val gameAutoInvalid = localConfig.gameAutoCashOutEnabled &&
-                            (parsedGameAutoTarget == null || !parsedGameAutoTarget.isFinite() || parsedGameAutoTarget < 1.01)
-                        val flightInvalid = parsedMinFlight == null || parsedMinFlight !in 0L..60_000L
                         val thresholdsInvalid = parsedLow == null || !parsedLow.isFinite() || parsedLow < 1.01 ||
                             parsedBoundary == null || !parsedBoundary.isFinite() || parsedBoundary < 1.01 ||
                             parsedBig == null || !parsedBig.isFinite() || parsedBig <= parsedLow
@@ -983,8 +843,8 @@ fun OverlaySettingsPanelComposable(
                         val quietInvalid = localNotif.quietHoursEnabled &&
                             (quietStart == null || quietStart !in 0..23 || quietEnd == null || quietEnd !in 0..23)
 
-                        if (stakeInvalid || targetInvalid || gameAutoInvalid || flightInvalid || thresholdsInvalid || scheduleInvalid || quietInvalid) {
-                            validationError = "Please check numeric inputs (Stake >= 1.0, Targets >= 1.01, Big > Low, HH:MM)."
+                        if (stakeInvalid || targetInvalid || thresholdsInvalid || scheduleInvalid || quietInvalid) {
+                            validationError = "Please check numeric inputs (Stake >= 1.0, Target >= 1.01, Big > Low, HH:MM)."
                             runCatching {
                                 Toast.makeText(context, "Please check settings inputs", Toast.LENGTH_SHORT).show()
                             }
@@ -995,8 +855,6 @@ fun OverlaySettingsPanelComposable(
                         val finalizedConfig = localConfig.copy(
                             baseStake = parsedStake!!,
                             targetMultiplier = parsedTarget!!,
-                            gameAutoCashOutTarget = parsedGameAutoTarget ?: localConfig.gameAutoCashOutTarget,
-                            minFlightTimeBeforeCashOutMs = parsedMinFlight!!,
                             lowThreshold = parsedLow!!,
                             boundaryValue = parsedBoundary!!,
                             bigThreshold = parsedBig!!,
@@ -1116,10 +974,11 @@ private fun parseOverlayHourMinute(raw: String): Pair<Int, Int>? {
 }
 
 /**
- * Dedicated Action Hand Settings window with two clearly separated sections:
- *  - BET SETTINGS (manual/automatic mode, stake, verification, keyboard dismiss, game-side Auto Cash Out, window timeouts)
- *  - CASH OUT SETTINGS (manual/automatic mode, target multiplier, minimum flight time)
+ * Dedicated BET Hand Settings window:
+ *  - BET SETTINGS (manual/automatic mode, stake, win target multiplier for round tracking,
+ *    stake read-back verification, keyboard dismiss, execution timeouts)
  * Wired directly to the single authoritative Room StrategyConfig so General Settings never conflict.
+ * Cash Out is left entirely to the game.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -1137,26 +996,14 @@ fun DedicatedHandSettingsComposable(
     var baseStakeText by remember(strategyConfig.baseStake) {
         mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.baseStake))
     }
-    var gameAutoTargetText by remember(strategyConfig.gameAutoCashOutTarget) {
-        mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.gameAutoCashOutTarget))
-    }
     var stakeTimeoutText by remember(strategyConfig.stakeEditTimeoutMs) {
         mutableStateOf(strategyConfig.stakeEditTimeoutMs.toString())
-    }
-    var autoCashTimeoutText by remember(strategyConfig.autoCashOutTimeoutMs) {
-        mutableStateOf(strategyConfig.autoCashOutTimeoutMs.toString())
     }
     var totalWindowTimeoutText by remember(strategyConfig.betWindowTotalTimeoutMs) {
         mutableStateOf(strategyConfig.betWindowTotalTimeoutMs.toString())
     }
-    var minRemWindowText by remember(strategyConfig.minRemainingBetWindowMs) {
-        mutableStateOf(strategyConfig.minRemainingBetWindowMs.toString())
-    }
     var targetMultText by remember(strategyConfig.targetMultiplier) {
         mutableStateOf(String.format(Locale.US, "%.2f", strategyConfig.targetMultiplier))
-    }
-    var minFlightTimeText by remember(strategyConfig.minFlightTimeBeforeCashOutMs) {
-        mutableStateOf(strategyConfig.minFlightTimeBeforeCashOutMs.toString())
     }
     var validationError by remember { mutableStateOf<String?>(null) }
 
@@ -1184,20 +1031,20 @@ fun DedicatedHandSettingsComposable(
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                         Icon(
                             imageVector = Icons.Default.TouchApp,
-                            contentDescription = "Action Hand Settings",
+                            contentDescription = "BET Hand Settings",
                             tint = PrimaryCobalt,
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "ACTION HAND SETTINGS",
+                                text = "BET HAND SETTINGS",
                                 fontWeight = FontWeight.ExtraBold,
                                 fontSize = 13.sp,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = "Authoritative Bet & Cash Out Execution Config",
+                                text = "Authoritative BET Hand & Win Target Config",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1269,6 +1116,17 @@ fun DedicatedHandSettingsComposable(
                             .testTag("hand_settings_base_stake_input")
                     )
 
+                    OutlinedTextField(
+                        value = targetMultText,
+                        onValueChange = { targetMultText = it },
+                        label = { Text("Win Target Multiplier (x) — game settles Cash Out", fontSize = 11.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("hand_settings_target_multiplier_input")
+                    )
+
                     OverlayToggleRow(
                         label = "Verify Stake Input Read-Back Before Bet",
                         checked = localConfig.verifyStakeReadBack,
@@ -1283,37 +1141,6 @@ fun DedicatedHandSettingsComposable(
                         onCheckedChange = { localConfig = localConfig.copy(dismissKeyboardBeforeBet = it) }
                     )
 
-                    OverlayToggleRow(
-                        label = "Enable Game-Side Auto Cash Out",
-                        checked = localConfig.gameAutoCashOutEnabled,
-                        testTag = "hand_settings_game_auto_cashout_switch",
-                        onCheckedChange = { localConfig = localConfig.copy(gameAutoCashOutEnabled = it) }
-                    )
-
-                    if (localConfig.gameAutoCashOutEnabled) {
-                        OutlinedTextField(
-                            value = gameAutoTargetText,
-                            onValueChange = { gameAutoTargetText = it },
-                            label = { Text("Game Auto Cash Out Target (e.g. 2.00x)", fontSize = 11.sp) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("hand_settings_game_auto_cashout_target_input")
-                        )
-                        Text("Auto Cash Out Mode", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            listOf("OFF", "ENSURE", "SKIP_IF_ALREADY_SET").forEach { m ->
-                                FilterChip(
-                                    selected = localConfig.gameAutoCashOutMode == m,
-                                    onClick = { localConfig = localConfig.copy(gameAutoCashOutMode = m) },
-                                    label = { Text(m, fontSize = 9.sp) },
-                                    modifier = Modifier.testTag("hand_settings_autocash_mode_$m")
-                                )
-                            }
-                        }
-                    }
-
                     Text(
                         text = "Betting-Window Execution Timeouts (ms)",
                         fontSize = 10.sp,
@@ -1324,7 +1151,7 @@ fun DedicatedHandSettingsComposable(
                         OutlinedTextField(
                             value = stakeTimeoutText,
                             onValueChange = { stakeTimeoutText = it },
-                            label = { Text("Stake Target", fontSize = 10.sp) },
+                            label = { Text("Stake Target (ms)", fontSize = 10.sp) },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier
@@ -1332,93 +1159,21 @@ fun DedicatedHandSettingsComposable(
                                 .testTag("hand_settings_stake_timeout_input")
                         )
                         OutlinedTextField(
-                            value = autoCashTimeoutText,
-                            onValueChange = { autoCashTimeoutText = it },
-                            label = { Text("AutoCash", fontSize = 10.sp) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("hand_settings_autocash_timeout_input")
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
                             value = totalWindowTimeoutText,
                             onValueChange = { totalWindowTimeoutText = it },
-                            label = { Text("Window Total", fontSize = 10.sp) },
+                            label = { Text("Window Total (ms)", fontSize = 10.sp) },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("hand_settings_window_total_timeout_input")
                         )
-                        OutlinedTextField(
-                            value = minRemWindowText,
-                            onValueChange = { minRemWindowText = it },
-                            label = { Text("Min Remain", fontSize = 10.sp) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("hand_settings_min_remaining_window_input")
-                        )
                     }
-                }
-
-                // SECTION 2: CASH OUT SETTINGS
-                OverlaySettingsSectionCard(
-                    title = "CASH OUT SETTINGS",
-                    icon = Icons.Default.Security,
-                    trailingBadge = {
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = if (localConfig.isAutoCashOutEnabled) {
-                                ActionStartEmerald.copy(alpha = 0.14f)
-                            } else {
-                                Color(0xFFFEF3C7)
-                            }
-                        ) {
-                            Text(
-                                text = if (localConfig.isAutoCashOutEnabled) "AUTOMATIC" else "MANUAL TAP",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (localConfig.isAutoCashOutEnabled) ActionStartEmerald else Color(0xFFB45309),
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
-                        }
-                    },
-                    modifier = Modifier.testTag("hand_settings_cashout_section")
-                ) {
-                    OverlayToggleRow(
-                        label = "Automatic Cash Out (ON = auto at Target, OFF = manual single-tap Cash Out)",
-                        checked = localConfig.isAutoCashOutEnabled,
-                        testTag = "hand_settings_auto_cashout_switch",
-                        onCheckedChange = { localConfig = localConfig.copy(isAutoCashOutEnabled = it) }
+                    Text(
+                        text = "Cash Out is left to the game. Outcomes >= target multiplier count as wins for logs & Martingale progression.",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = targetMultText,
-                            onValueChange = { targetMultText = it },
-                            label = { Text("Target Multiplier (x)", fontSize = 11.sp) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("hand_settings_target_multiplier_input")
-                        )
-                        OutlinedTextField(
-                            value = minFlightTimeText,
-                            onValueChange = { minFlightTimeText = it },
-                            label = { Text("Min Flight Time (ms)", fontSize = 11.sp) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("hand_settings_min_flight_input")
-                        )
-                    }
                 }
 
                 if (onToggleActionHand != null || onOpenGeneralSettings != null) {
@@ -1488,24 +1243,16 @@ fun DedicatedHandSettingsComposable(
                     onClick = {
                         val stake = baseStakeText.trim().toDoubleOrNull()
                         val targetMult = targetMultText.trim().toDoubleOrNull()
-                        val gameAutoTarget = gameAutoTargetText.trim().toDoubleOrNull()
-                        val minFlight = minFlightTimeText.trim().toLongOrNull()
                         val stakeTimeout = stakeTimeoutText.trim().toLongOrNull()
-                        val autoCashTimeout = autoCashTimeoutText.trim().toLongOrNull()
                         val totalTimeout = totalWindowTimeoutText.trim().toLongOrNull()
-                        val minRem = minRemWindowText.trim().toLongOrNull()
 
                         val invalid = stake == null || !stake.isFinite() || stake < 1.0 ||
                             targetMult == null || !targetMult.isFinite() || targetMult < 1.01 ||
-                            (localConfig.gameAutoCashOutEnabled && (gameAutoTarget == null || !gameAutoTarget.isFinite() || gameAutoTarget < 1.01)) ||
-                            minFlight == null || minFlight !in 0L..60_000L ||
                             stakeTimeout == null || stakeTimeout !in 150L..5_000L ||
-                            autoCashTimeout == null || autoCashTimeout !in 150L..5_000L ||
-                            totalTimeout == null || totalTimeout !in 500L..15_000L ||
-                            minRem == null || minRem !in 300L..10_000L
+                            totalTimeout == null || totalTimeout !in 500L..15_000L
 
                         if (invalid) {
-                            validationError = "Invalid input: Stake >= 1.0, Targets >= 1.01, Flight 0–60000ms, Timeouts 150–15000ms."
+                            validationError = "Invalid input: Stake >= 1.0, Target >= 1.01, Timeouts 150–15000ms."
                             runCatching { Toast.makeText(context, validationError, Toast.LENGTH_SHORT).show() }
                             return@Button
                         }
@@ -1515,12 +1262,8 @@ fun DedicatedHandSettingsComposable(
                             localConfig.copy(
                                 baseStake = stake!!,
                                 targetMultiplier = targetMult!!,
-                                gameAutoCashOutTarget = gameAutoTarget ?: localConfig.gameAutoCashOutTarget,
-                                minFlightTimeBeforeCashOutMs = minFlight!!,
                                 stakeEditTimeoutMs = stakeTimeout!!,
-                                autoCashOutTimeoutMs = autoCashTimeout!!,
-                                betWindowTotalTimeoutMs = totalTimeout!!,
-                                minRemainingBetWindowMs = minRem!!
+                                betWindowTotalTimeoutMs = totalTimeout!!
                             )
                         )
                     },

@@ -1656,8 +1656,6 @@ open class ScreenEarnerOverlayService : Service(), LifecycleOwner, ViewModelStor
 
                     val betShortcut = shortcuts.firstOrNull { it.type == ShortcutType.BET && it.isCalibrated && it.targetX > 0f }
                         ?: shortcuts.firstOrNull { it.type == ShortcutType.BET && it.label.contains("HAND", ignoreCase = true) }
-                    val cashOutShortcut = shortcuts.firstOrNull { it.type == ShortcutType.CASH_OUT && it.isCalibrated && it.targetX > 0f }
-                        ?: shortcuts.firstOrNull { it.type == ShortcutType.CASH_OUT }
                     val isMonitorActive = isMonitoringStatusActive(monitoringStatus)
 
                     Card(
@@ -1892,15 +1890,6 @@ open class ScreenEarnerOverlayService : Service(), LifecycleOwner, ViewModelStor
                                                 runCatching {
                                                     repo?.saveStrategyConfig(
                                                         activeConfig.copy(isAutoBetEnabled = enabled)
-                                                    )
-                                                }
-                                            }
-                                        },
-                                        onToggleAutoCashOut = { enabled ->
-                                            serviceScope.launch {
-                                                runCatching {
-                                                    repo?.saveStrategyConfig(
-                                                        activeConfig.copy(isAutoCashOutEnabled = enabled)
                                                     )
                                                 }
                                             }

@@ -136,10 +136,9 @@ class ScreenEarnerAccessibilityService : AccessibilityController() {
             val gameDetected = (resolvedAdapter != null && resolvedAdapter.gameId != "unknown") || hasCrashGameSignals
 
             val missing = buildList {
-                if (!targets.isBetBtnDetected && !targets.isCancelBtnDetected &&
-                    !targets.isCashOutBtnDetected
-                ) add("Bet Control Target")
-                if (!targets.isCashOutBtnDetected) add("Cash Out Target")
+                if (!targets.isBetBtnDetected && !targets.isCancelBtnDetected) {
+                    add("Bet Control Target")
+                }
                 if (!targets.isStakeInputDetected && !targets.isDoubleBtnDetected &&
                     !targets.isAddBtnDetected
                 ) add("Stake Input Control")
@@ -226,8 +225,10 @@ class ScreenEarnerAccessibilityService : AccessibilityController() {
                 .getOrDefault("")
             val ownPkg = runCatching { applicationContext?.packageName }.getOrNull()
 
-            // Ignore Predict Manager's own overlay events; do not let its controls become game targets.
-            if (!ownPkg.isNullOrBlank() && packageName == ownPkg) return
+            // Ignore Predict Manager's own overlay events and unrelated system/Edge Panel surfaces.
+            if ((!ownPkg.isNullOrBlank() && packageName == ownPkg) ||
+                AccessibilityController.isExcludedForegroundPackage(packageName)
+            ) return
 
             super.onAccessibilityEvent(event)
 

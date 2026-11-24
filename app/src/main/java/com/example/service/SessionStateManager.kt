@@ -2,6 +2,7 @@ package com.example.service
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.data.engine.StrategyProgressionSnapshot
 import com.example.data.model.MonitoringStatus
 import org.json.JSONArray
 import org.json.JSONObject
@@ -53,6 +54,7 @@ class SessionStateManager(context: Context) {
         private const val KEY_DAILY_LOSS_DATE = "daily_loss_date_key"
         private const val KEY_DAILY_LOSS_AMOUNT = "daily_loss_amount"
         private const val KEY_AUTOMATION_ENABLED = "automation_assistant_enabled"
+        private const val KEY_STRATEGY_PROGRESSION_JSON = "strategy_progression_snapshot_json"
     }
 
     private val prefs: SharedPreferences =
@@ -285,7 +287,64 @@ class SessionStateManager(context: Context) {
             .putBoolean(KEY_INTENDED_MONITORING_ACTIVE, false)
             .putString(KEY_MONITORING_DESIRED_STATE, MonitoringStatus.STOPPED.name)
         allKeys.forEach { ed.remove(it) }
+        ed.remove(KEY_STRATEGY_PROGRESSION_JSON)
         ed.commit()
+    }
+
+    fun saveStrategyProgression(snapshot: StrategyProgressionSnapshot) {
+        val obj = JSONObject().apply {
+            put("clc", snapshot.consecutiveLowCount)
+            put("col", snapshot.consecutiveObservedLosses)
+            put("phw", snapshot.postHighWaitCount)
+            put("lhm", snapshot.lastHighMultiplier)
+            put("iwph", snapshot.isWaitingForPostHigh)
+            put("arid", snapshot.activeRuleIdName ?: JSONObject.NULL)
+            put("arl", snapshot.activeRuleLabel ?: JSONObject.NULL)
+            put("twf", snapshot.targetWinsToFetch)
+            put("pwrid", snapshot.pendingWaitRuleIdName ?: JSONObject.NULL)
+            put("pwrl", snapshot.pendingWaitRuleLabel ?: JSONObject.NULL)
+            put("wut", snapshot.waitUntilTimestamp)
+            put("ibsa", snapshot.isBettingSessionActive)
+            put("sst", snapshot.sessionStartedTimestamp)
+            put("csl", snapshot.currentStakeLevel)
+            put("cws", snapshot.consecutiveWinsInSession)
+            put("cls", snapshot.consecutiveLossesInSession)
+            put("ccs", snapshot.currentCalculatedStake)
+        }
+        prefs.edit().putString(KEY_STRATEGY_PROGRESSION_JSON, obj.toString()).commit()
+    }
+
+    fun loadStrategyProgression(): StrategyProgressionSnapshot? {
+        val raw = prefs.getString(KEY_STRATEGY_PROGRESSION_JSON, null) ?: return null
+        if (raw.isBlank()) return null
+        return try {
+            val obj = JSONObject(raw)
+            StrategyProgressionSnapshot(
+                consecutiveLowCount = obj.optInt("clc", 0),
+                consecutiveObservedLosses = obj.optInt("col", 0),
+                postHighWaitCount = obj.optInt("phw", 0),
+                lastHighMultiplier = obj.optDouble("lhm", 0.0),
+                isWaitingForPostHigh = obj.optBoolean("iwph", false),
+                activeRuleIdName = if (obj.isNull("arid")) null else obj.optString("arid", "").takeIf { it.isNotBlank() },
+                activeRuleLabel = if (obj.isNull("arl")) null else obj.optString("arl", "").takeIf { it.isNotBlank() },
+                targetWinsToFetch = obj.optInt("twf", 2).coerceAtLeast(1),
+                pendingWaitRuleIdName = if (obj.isNull("pwrid")) null else obj.optString("pwrid", "").takeIf { it.isNotBlank() },
+                pendingWaitRuleLabel = if (obj.isNull("pwrl")) null else obj.optString("pwrl", "").takeIf { it.isNotBlank() },
+                waitUntilTimestamp = obj.optLong("wut", 0L),
+                isBettingSessionActive = obj.optBoolean("ibsa", false),
+                sessionStartedTimestamp = obj.optLong("sst", 0L),
+                currentStakeLevel = obj.optInt("csl", 1).coerceAtLeast(1),
+                consecutiveWinsInSession = obj.optInt("cws", 0).coerceAtLeast(0),
+                consecutiveLossesInSession = obj.optInt("cls", 0).coerceAtLeast(0),
+                currentCalculatedStake = obj.optDouble("ccs", 10.0).takeIf { it.isFinite() && it >= 0.0 } ?: 10.0
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    fun clearStrategyProgression() {
+        prefs.edit().remove(KEY_STRATEGY_PROGRESSION_JSON).commit()
     }
 
     fun saveTopPillPosition(x: Int, y: Int) {

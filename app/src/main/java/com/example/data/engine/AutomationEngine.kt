@@ -76,7 +76,6 @@ interface TargetUiInteractor {
     )
 
     fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit)
-    fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit)
     fun cancelPendingGestures(reason: String) {}
     fun dismissKeyboardIfOpen(): Boolean = false
     /** Presses the stake box's "-" button down to the site floor; null when it cannot be determined. */
@@ -87,14 +86,6 @@ interface TargetUiInteractor {
     /** Waits until the game layout stops moving (keyboard closed, button bounds unchanged); true = settled. */
     fun awaitStableLayout(onDone: (Boolean) -> Unit) {
         onDone(true)
-    }
-    fun configureAutoCashOut(
-        enabled: Boolean,
-        targetMultiplier: Double,
-        mode: String,
-        onComplete: (Boolean, String?) -> Unit
-    ) {
-        onComplete(true, null)
     }
 }
 
@@ -141,17 +132,7 @@ class AccessibilityTargetUiInteractor : TargetUiInteractor {
     override fun clickBet(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
         val controller = AccessibilityController.controllerInstance
         if (controller != null) {
-            // Prefer user-placed hand coordinates when available; do not discard them.
             controller.clickBetTarget(fallbackX, fallbackY, onComplete)
-        } else {
-            onComplete(false)
-        }
-    }
-
-    override fun clickCashOut(fallbackX: Float?, fallbackY: Float?, onComplete: (Boolean) -> Unit) {
-        val controller = AccessibilityController.controllerInstance
-        if (controller != null) {
-            controller.clickCashOutTarget(fallbackX, fallbackY, onComplete)
         } else {
             onComplete(false)
         }
@@ -168,20 +149,6 @@ class AccessibilityTargetUiInteractor : TargetUiInteractor {
         } else {
             controller.awaitStableBetLayout(onDone = onDone)
         }
-    }
-
-    override fun configureAutoCashOut(
-        enabled: Boolean,
-        targetMultiplier: Double,
-        mode: String,
-        onComplete: (Boolean, String?) -> Unit
-    ) {
-        val controller = AccessibilityController.controllerInstance
-        if (controller == null) {
-            onComplete(false, "Accessibility controller unavailable for Auto Cash Out.")
-            return
-        }
-        controller.configureGameAutoCashOut(enabled, targetMultiplier, mode, onComplete)
     }
 
     override fun cancelPendingGestures(reason: String) {
@@ -274,11 +241,6 @@ class AutomationEngine(
     private var currentRoundBetActive = false
     private var currentRoundStake = 0.0
     private var currentRoundCashedOut = false
-    private var cashOutAttemptedThisRound = false
-    private var cashOutAttemptCount = 0
-    private var lastCashOutAttemptWallMs = 0L
-    private var sawCashOutAvailableInCurrentFlight = false
-    private var inFlightWaitingNoticeEmitted = false
     private var currentRoundTriggerLabel = ""
     private var activeSequenceExposure = 0.0
 
@@ -291,14 +253,19 @@ class AutomationEngine(
     // Phase timing & bounded retry state
     private var lastObservedPhaseInEngine: String = ""
     private var lastBettingOpenAtMs: Long = 0L
-    private var lastBettingOpenWallClockMs: Long = 0L
     private var inFlightStartedAtMs: Long = 0L
     private var activeTargetMultiplierOverride: Double? = null
 
-    // Audit trail for every bet (intent -> stake -> auto cash out -> dispatch -> accept -> settlement).
+    // Audit trail for every bet (intent -> stake -> dispatch -> accept -> settlement).
     private val txManager = BetTransactionManager()
     val betTransactions: BetTransactionManager get() = txManager
     private var activeTxId: String? = null
+
+    var onProgressionStateChanged: ((StrategyProgressionSnapshot) -> Unit)? = null
+
+    private fun notifyProgressionChanged() {
+        onProgressionStateChanged?.invoke(strategyEngine.exportProgressionSnapshot())
+    }
 
     // Stake limits learned per "platform|game": from the - button probe, the site's own rejection messages, or the saved profile.
     private val learnedStakeLimits = ConcurrentHashMap<String, Pair<Double?, Double?>>()
@@ -339,45 +306,14 @@ class AutomationEngine(
         if (old == updated) return
         learnedStakeLimits[key] = updated
         publishStatusTicker("Learned site stake limits ($source): min=${newMin ?: "?"} max=${newMax ?: "?"}")
-        scope.launch {
-            runCatching {
-                val profiles = repository.profiles.first()
-                val p = findMatchingProfile(profiles, key)
-                if (p != null) {
-                    repository.insertProfile(
-                        p.copy(
-                            minStake = newMin ?: p.minStake,
-                            maxStake = newMax ?: p.maxStake
-                        )
-                    )
-                }
-            }
-        }
     }
 
     private fun loadProfileLimitsOnce(key: String) {
-        if (!profileLimitsLoaded.add(key)) return
-        scope.launch {
-            runCatching {
-                val p = findMatchingProfile(repository.profiles.first(), key) ?: return@runCatching
-                val min = p.minStake.takeIf { it.isFinite() && it > 1.0 }
-                val max = p.maxStake.takeIf { it.isFinite() && it > 0.0 && it < 1_000_000.0 }
-                if (min != null && max != null && min > max) return@runCatching
-                if (min != null || max != null) {
-                    learnedStakeLimits.putIfAbsent(key, min to max)
-                }
-            }
-        }
+        profileLimitsLoaded.add(key)
     }
 
-    /** True only after the game's own Auto Cash Out was verified ON at the user's target for the current bet. */
-    private var gameAutoCashOutArmedForRound = false
-
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private val txScope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
-
     private fun txLaunch(block: suspend BetTransactionManager.() -> Unit) {
-        txScope.launch { runCatching { txManager.block() } }
+        scope.launch { runCatching { txManager.block() } }
     }
 
     private fun setRoundBetActive(active: Boolean) {
@@ -396,8 +332,7 @@ class AutomationEngine(
     private val _queuedOpportunityCount = MutableStateFlow(0)
     val queuedOpportunityCount: StateFlow<Int> = _queuedOpportunityCount.asStateFlow()
 
-    var currentDailyLossProvider: ((nowMs: Long) -> Double?)? =
-        if (targetUiInteractor !is AccessibilityTargetUiInteractor) { { 0.0 } } else null
+    var currentDailyLossProvider: ((nowMs: Long) -> Double?)? = null
     var onDailyNetOutcomeRecorded: ((netProfit: Double, nowMs: Long) -> Double)? = null
 
     @Volatile
@@ -480,6 +415,7 @@ class AutomationEngine(
         )
         if (activated) {
             activeTargetMultiplierOverride = nextOpp.targetMultiplierOverride
+            notifyProgressionChanged()
             gameDetection.updateStrategyTelemetry(
                 strategyEngine.getState(),
                 "Pattern Triggered: ${nextOpp.strategyName}"
@@ -757,7 +693,7 @@ class AutomationEngine(
         return check
     }
 
-    fun startAutomation(config: StrategyConfig, limits: RiskLimits) {
+    fun startAutomation(config: StrategyConfig, limits: RiskLimits, resetProgression: Boolean = false) {
         latestConfigCache = config
         latestLimitsCache = limits
         if (limits.emergencyStop) {
@@ -784,13 +720,29 @@ class AutomationEngine(
         setRoundBetActive(false)
         currentRoundBetAttemptLockKey = null
         currentRoundCashedOut = false
-        cashOutAttemptedThisRound = false
-        sawCashOutAvailableInCurrentFlight = false
-        inFlightWaitingNoticeEmitted = false
         lastLifecycleNoticeStage = null
         isActionInProgress.set(false)
         lastBetFailureEpisodeKey = null
+        if (resetProgression) {
+            strategyEngine.reset(config.baseStake)
+            notifyProgressionChanged()
+        } else {
+            strategyEngine.bindStrategyConfig(config)
+        }
+        gameDetection.updateStrategyTelemetry(
+            strategyEngine.getState(),
+            formatTriggerLabel(strategyEngine.getState().activeTrigger, strategyEngine.getState())
+        )
+    }
+
+    fun resetStrategyProgression(config: StrategyConfig = latestConfigCache) {
+        latestConfigCache = config
         strategyEngine.reset(config.baseStake)
+        strategyEngine.bindStrategyConfig(config)
+        activeTargetMultiplierOverride = null
+        gameDetection.updateStrategyTelemetry(strategyEngine.getState(), null)
+        notifyProgressionChanged()
+        publishStatusTicker("Strategy & Martingale progression reset to base stake.")
     }
 
     fun resetSessionStats(currentTimeMs: Long = System.currentTimeMillis()) {
@@ -804,7 +756,6 @@ class AutomationEngine(
         activeSequenceExposure = 0.0
         lastObservedPhaseInEngine = ""
         lastBettingOpenAtMs = 0L
-        lastBettingOpenWallClockMs = 0L
         inFlightStartedAtMs = 0L
         currentRoundBetAttemptLockKey = null
         clearOpportunityQueue()
@@ -826,12 +777,7 @@ class AutomationEngine(
         platformName: String = activePlatformName.ifBlank { gameDetection.gameState.value.platformName },
         currentTimeMs: Long = System.currentTimeMillis()
     ) {
-        cashOutAttemptedThisRound = false
-        cashOutAttemptCount = 0
-        lastCashOutAttemptWallMs = 0L
-        sawCashOutAvailableInCurrentFlight = false
-        inFlightWaitingNoticeEmitted = false
-        if (_automationState.value == AutomationState.RUNNING && currentRoundBetActive) {
+        if (currentRoundBetActive) {
             settleActiveRoundBet(
                 stakeUsed = currentRoundStake,
                 crashedMultiplier = crashedMultiplier,
@@ -892,6 +838,7 @@ class AutomationEngine(
         }
         val triggerName = formatTriggerLabel(trigger, stratState)
         gameDetection.updateStrategyTelemetry(stratState, triggerName)
+        notifyProgressionChanged()
         if (_automationState.value == AutomationState.RUNNING &&
             config.isAutoBetEnabled &&
             stratState.isBettingSessionActive &&
@@ -907,11 +854,7 @@ class AutomationEngine(
         latestLimitsCache = limits
         if (_automationState.value != AutomationState.RUNNING) return false
         val dailyLoss = currentDailyLossProvider?.invoke(currentTimeMs)
-        if (limits.stopOnLossEnabled && limits.maxDailyLoss > 0.0) {
-            if (dailyLoss == null) {
-                haltAutomationForLimit("Daily loss protection engaged: daily loss data is unavailable (fail-closed).")
-                return true
-            }
+        if (limits.stopOnLossEnabled && limits.maxDailyLoss > 0.0 && dailyLoss != null) {
             if (dailyLoss >= limits.maxDailyLoss) {
                 haltAutomationForLimit("Daily loss limit reached (-${CurrencyManager.formatAmount(dailyLoss)} >= ${CurrencyManager.formatAmount(limits.maxDailyLoss)}).")
                 return true
@@ -933,9 +876,6 @@ class AutomationEngine(
     private fun haltAutomationForLimit(reason: String) {
         setRoundBetActive(false)
         currentRoundCashedOut = false
-        cashOutAttemptedThisRound = false
-        sawCashOutAvailableInCurrentFlight = false
-        inFlightWaitingNoticeEmitted = false
         lastLifecycleNoticeStage = null
         isActionInProgress.set(false)
         gameDetection.setBetPlaced(false)
@@ -1011,17 +951,14 @@ class AutomationEngine(
         setRoundBetActive(false)
         currentRoundBetAttemptLockKey = null
         currentRoundCashedOut = false
-        cashOutAttemptedThisRound = false
-        sawCashOutAvailableInCurrentFlight = false
-        inFlightWaitingNoticeEmitted = false
         lastLifecycleNoticeStage = null
         isActionInProgress.set(false)
         lastBetFailureEpisodeKey = null
         activeSequenceExposure = 0.0
         clearOpportunityQueue()
         gameDetection.setBetPlaced(false)
-        strategyEngine.reset()
-        publishStatusTicker("Automation stopped (Monitoring continues if active).")
+        notifyProgressionChanged()
+        publishStatusTicker("Automation stopped (Monitoring continues; progression preserved).")
     }
 
     fun triggerEmergencyStop(reason: String = "Emergency Stop active in Risk Settings.") {
@@ -1063,9 +1000,6 @@ class AutomationEngine(
                 isPausedBySchedule = true
                 setRoundBetActive(false)
                 currentRoundCashedOut = false
-                cashOutAttemptedThisRound = false
-                sawCashOutAvailableInCurrentFlight = false
-                inFlightWaitingNoticeEmitted = false
                 lastLifecycleNoticeStage = null
                 isActionInProgress.set(false)
                 gameDetection.setBetPlaced(false)
@@ -1098,12 +1032,12 @@ class AutomationEngine(
         if (timerTrigger is StrategyTrigger.SessionTimedOut) {
             setRoundBetActive(false)
             currentRoundCashedOut = false
-            cashOutAttemptedThisRound = false
-            sawCashOutAvailableInCurrentFlight = false
-            inFlightWaitingNoticeEmitted = false
             lastLifecycleNoticeStage = null
             // A strategy-session timeout must not unlock an asynchronous UI action.
             gameDetection.setBetPlaced(false)
+            notifyProgressionChanged()
+        } else if (timerTrigger is StrategyTrigger.WaitTimerCompleted) {
+            notifyProgressionChanged()
         }
         val stratState = strategyEngine.getState()
         val triggerLabel = formatTriggerLabel(timerTrigger, stratState)
@@ -1112,9 +1046,9 @@ class AutomationEngine(
 
     /**
      * Called continuously as game phases, site button states, & live multipliers arrive from AccessibilityService:
-     * - During BETTING_OPEN: places calibrated BET ONLY when siteButtonState == IDLE_READY_TO_BET
-     *   (never double-clicks when "Cancel" / "Waiting for next round" is visible).
-     * - During IN_FLIGHT: triggers calibrated CASH OUT when liveMultiplier >= targetMultiplier and Cash Out is available.
+     * - During BETTING_OPEN: places verified BET ONLY when siteButtonState is ready and an eligible strategy
+     *   session is active (never double-clicks when "Cancel" / BET_QUEUED is active).
+     * - During IN_FLIGHT: leaves Cash Out completely to the game or user and awaits settlement at CRASHED.
      */
     fun handlePhaseUpdate(
         phase: String,
@@ -1130,23 +1064,10 @@ class AutomationEngine(
         if (phase != lastObservedPhaseInEngine) {
             if (phase == "BETTING_OPEN") {
                 lastBettingOpenAtMs = currentTimeMs
-                lastBettingOpenWallClockMs = System.currentTimeMillis()
-                cashOutAttemptCount = 0
-                lastCashOutAttemptWallMs = 0L
                 inFlightStartedAtMs = 0L
-                sawCashOutAvailableInCurrentFlight = false
-                inFlightWaitingNoticeEmitted = false
                 currentRoundBetAttemptLockKey = null
             } else if (phase == "IN_FLIGHT") {
-                inFlightStartedAtMs = if (lastObservedPhaseInEngine == "BETTING_OPEN" &&
-                    lastBettingOpenAtMs > 0L &&
-                    liveMultiplier >= 1.25 &&
-                    (currentTimeMs - lastBettingOpenAtMs) >= config.minFlightTimeBeforeCashOutMs
-                ) {
-                    lastBettingOpenAtMs
-                } else {
-                    currentTimeMs
-                }
+                inFlightStartedAtMs = currentTimeMs
             } else if (phase == "CRASHED") {
                 inFlightStartedAtMs = 0L
                 currentRoundBetAttemptLockKey = null
@@ -1166,7 +1087,7 @@ class AutomationEngine(
         val stratState = strategyEngine.getState()
 
         if (siteButtonState == SiteButtonState.BET_QUEUED) {
-            publishStatusTicker("Button state: CANCEL (Red) -> Waiting for round start")
+            publishStatusTicker("Button state: CANCEL -> Waiting for round start")
             if (lastLifecycleNoticeStage != "BET_QUEUED") {
                 lastLifecycleNoticeStage = "BET_QUEUED"
                 emitExecutionNotice(
@@ -1200,15 +1121,8 @@ class AutomationEngine(
             }
         }
 
-        // Enter bet sequence when strategy is active and round is open.
-        // Allow IDLE_READY_TO_BET or UNKNOWN (hand-calibrated path does not need perfect button-state detection).
-        val earlyHandReady = FloatingHandsOverlayManager.getLiveHandCenter() != null ||
-            findActiveShortcut(ShortcutType.BET)?.let { sc ->
-                (sc.targetX > 0f && sc.targetY > 0f) || (sc.visualX > 0f && sc.visualY > 0f)
-            } == true
         val buttonLooksReady = siteButtonState == SiteButtonState.IDLE_READY_TO_BET ||
-            siteButtonState == SiteButtonState.UNKNOWN ||
-            earlyHandReady
+            siteButtonState == SiteButtonState.UNKNOWN
         if (phase == "BETTING_OPEN" &&
             buttonLooksReady &&
             stratState.isBettingSessionActive &&
@@ -1260,46 +1174,6 @@ class AutomationEngine(
                 isManualTrigger = false,
                 roundLockKey = roundLockKey
             )
-        } else if (phase == "IN_FLIGHT") {
-            if (siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE) {
-                sawCashOutAvailableInCurrentFlight = true
-            }
-            val hasBetForNotice = currentRoundBetActive ||
-                gameDetection.gameState.value.isBetPlaced ||
-                (config.cashOutUntrackedBets && config.isAutoCashOutEnabled && siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE)
-            if (hasBetForNotice && !currentRoundCashedOut && !inFlightWaitingNoticeEmitted) {
-                inFlightWaitingNoticeEmitted = true
-                val effectiveTarget = (activeTargetMultiplierOverride ?: config.targetMultiplier).coerceAtLeast(1.01)
-                lastLifecycleNoticeStage = "WAITING_CASHOUT"
-                emitExecutionNotice(
-                    type = StrategyNotificationType.AUTOMATION_ACTION,
-                    title = "In-Flight: Waiting for Cash Out (${String.format(Locale.US, "%.2fx", effectiveTarget)})",
-                    message = "Round live on ${gameDetection.gameState.value.displayedGameName.ifBlank { "game" }}; watching live multiplier toward ${String.format(Locale.US, "%.2fx", effectiveTarget)}.",
-                    occurrenceKey = "waiting_cashout_${gameDetection.gameState.value.currentRoundId ?: "live"}",
-                    priority = NotificationPriorityLevel.STANDARD,
-                    cooldownMs = 5_000L
-                )
-            }
-            if (currentRoundBetActive && !currentRoundCashedOut) {
-                if (sawCashOutAvailableInCurrentFlight &&
-                    (siteButtonState == SiteButtonState.IDLE_READY_TO_BET || siteButtonState == SiteButtonState.BET_QUEUED)
-                ) {
-                    settleActiveRoundBet(
-                        stakeUsed = currentRoundStake,
-                        crashedMultiplier = liveMultiplier.coerceAtLeast(1.01),
-                        cashedOutInFlight = true,
-                        triggerLabel = "Live Cash-Out Recognized ($currentRoundTriggerLabel)",
-                        config = config,
-                        limits = limits,
-                        platformName = activePlatformName,
-                        currentTimeMs = currentTimeMs
-                    )
-                    setRoundBetActive(false)
-                    currentRoundCashedOut = true
-                    gameDetection.setBetPlaced(false)
-                }
-            }
-            evaluateInFlightMultiplier(liveMultiplier, config, siteButtonState, limits, currentTimeMs)
         }
     }
 
@@ -1342,6 +1216,7 @@ class AutomationEngine(
             config.baseStake.coerceAtLeast(1.0)
         }
         val effectiveMode = config.resolvedMasterProgressionMode()
+        val strategyLabel = stratState.activeRuleLabel ?: if (config.isAutoBetEnabled) "Auto Bet Hand (Automatic Mode)" else "Manual BET Hand"
         val nowMs = System.currentTimeMillis()
         val roundLockKey = "manual_${buildRoundBetAttemptKey(activeGameId, activeRoundId, lastBettingOpenAtMs)}_$nowMs"
 
@@ -1353,155 +1228,12 @@ class AutomationEngine(
             activeGameId = activeGameId,
             activeGameName = activeGameName,
             activeRoundId = activeRoundId,
-            strategyLabel = "Manual Action Hand",
+            strategyLabel = strategyLabel,
             currentTimeMs = nowMs,
             isManualTrigger = true,
             roundLockKey = roundLockKey,
             onFinished = onFinished
         )
-    }
-
-    fun executeVerifiedManualCashOut(
-        config: StrategyConfig = latestConfigCache,
-        limits: RiskLimits = latestLimitsCache,
-        onFinished: ((Boolean, String) -> Unit)? = null
-    ) {
-        if (limits.emergencyStop) {
-            onFinished?.invoke(false, "Blocked: Emergency Stop active.")
-            return
-        }
-        val nowMs = System.currentTimeMillis()
-        val liveTargets = targetUiInteractor.refreshLiveTargets(latestUiTargets)
-        if (liveTargets != null) latestUiTargets = liveTargets
-
-        val gs = gameDetection.gameState.value
-        val activePhase = liveTargets?.gamePhase ?: gs.status
-        val activeBtn = liveTargets?.siteButtonState ?: gs.siteButtonState
-        val hasActiveBet = currentRoundBetActive || gs.isBetPlaced || activeBtn == SiteButtonState.CASH_OUT_AVAILABLE
-
-        if (!hasActiveBet) {
-            onFinished?.invoke(false, "Cash Out blocked: no active bet in current round.")
-            return
-        }
-        if (activePhase != "IN_FLIGHT") {
-            onFinished?.invoke(false, "Cash Out blocked: round phase is $activePhase.")
-            return
-        }
-        // When Action Hand is calibrated/visible, allow cash-out even if button-state/OCR is noisy.
-        val handReady = FloatingHandsOverlayManager.getLiveHandCenter() != null ||
-            findActiveShortcut(ShortcutType.BET)?.let { sc ->
-                (sc.targetX > 0f && sc.targetY > 0f) || (sc.visualX > 0f && sc.visualY > 0f)
-            } == true
-        if (activeBtn != SiteButtonState.CASH_OUT_AVAILABLE && !handReady) {
-            onFinished?.invoke(false, "Cash Out control unavailable ($activeBtn).")
-            return
-        }
-        if (!handReady) {
-            if (liveTargets != null && liveTargets.conflictReasons.isNotEmpty()) {
-                onFinished?.invoke(false, "Cash Out blocked by conflict: ${liveTargets.conflictReasons.first()}")
-                return
-            }
-            liveTargets?.detectCashOutCollisionReason()?.let { reason ->
-                onFinished?.invoke(false, reason)
-                return
-            }
-            if (liveTargets != null && liveTargets.isCashOutBtnDetected &&
-                (!liveTargets.isCashOutBtnEnabled || !liveTargets.isCashOutBtnClickable)
-            ) {
-                onFinished?.invoke(false, "Cash Out button is disabled or not clickable.")
-                return
-            }
-        }
-        if (cashOutAttemptedThisRound) {
-            onFinished?.invoke(false, "Cash Out already triggered for this round.")
-            return
-        }
-
-        val flightElapsedMs = if (inFlightStartedAtMs > 0L) (nowMs - inFlightStartedAtMs).coerceAtLeast(0L) else Long.MAX_VALUE
-        if (config.minFlightTimeBeforeCashOutMs > 0L && flightElapsedMs < config.minFlightTimeBeforeCashOutMs) {
-            onFinished?.invoke(false, "Waiting min flight time (${flightElapsedMs}ms < ${config.minFlightTimeBeforeCashOutMs}ms).")
-            return
-        }
-
-        // Prefer live Action Hand, then saved shortcut, then scanned CASH OUT bounds.
-        val liveHand = FloatingHandsOverlayManager.getLiveHandCenter()
-        val handShortcut = findActiveShortcut(ShortcutType.BET)
-        val savedHandCoords = handShortcut?.let { sc ->
-            val x = if (sc.targetX > 0f) sc.targetX else sc.visualX
-            val y = if (sc.targetY > 0f) sc.targetY else sc.visualY
-            if (x > 0f && y > 0f) x to y else null
-        }
-        val handCoords = liveHand ?: savedHandCoords
-        val verifiedBounds = liveTargets?.cashOutButtonBounds?.takeIf { !it.isEmpty }
-        val scannedCoords = verifiedBounds?.let { it.centerX().toFloat() to it.centerY().toFloat() }
-        val coords = handCoords ?: scannedCoords
-        val actionId = "manual_cashout_${nowMs}_${(1000..9999).random()}"
-        cashOutAttemptedThisRound = true
-
-        FloatingHandsOverlayManager.pulsePassThroughAll(280L)
-        targetUiInteractor.clickCashOut(coords?.first, coords?.second) { clickOk ->
-            if (!clickOk) {
-                cashOutAttemptedThisRound = false
-                recordActivityLog(actionId, ActionExecutionState.FAILED, "CASH_OUT", coords, false, "Manual hand cash-out click rejected", false, "Gesture/node click rejected")
-                onFinished?.invoke(false, "Cash Out click failed verification.")
-                return@clickCashOut
-            }
-
-            fun confirmManualCashOutSuccess() {
-                currentRoundCashedOut = true
-                gameDetection.setBetPlaced(false)
-                recordActivityLog(actionId, ActionExecutionState.COMPLETED, "CASH_OUT", coords, true, "Manual hand cash-out confirmed", true, null)
-                publishStatusTicker("Manual Cash Out confirmed")
-                onFinished?.invoke(true, "Cash Out confirmed!")
-            }
-
-            if (!targetUiInteractor.requiresPostActionVerification) {
-                confirmManualCashOutSuccess()
-            } else {
-                val immediateRescan = targetUiInteractor.refreshLiveTargets(null)
-                if (isFreshCashOutConfirmed(immediateRescan)) {
-                    confirmManualCashOutSuccess()
-                } else {
-                    scope.launch {
-                        var elapsed = 0L
-                        var confirmed = false
-                        while (elapsed < 2000L) {
-                            delay(100L)
-                            elapsed += 100L
-                            val rescan = targetUiInteractor.refreshLiveTargets(null)
-                            if (isFreshCashOutConfirmed(rescan)) {
-                                confirmed = true
-                                break
-                            }
-                            if (rescan != null && (rescan.isFlewAwayDetected || rescan.gamePhase == "CRASHED" || rescan.siteButtonState == SiteButtonState.CRASHED)) {
-                                break
-                            }
-                        }
-                        if (confirmed) {
-                            confirmManualCashOutSuccess()
-                        } else {
-                            cashOutAttemptedThisRound = false
-                            recordActivityLog(actionId, ActionExecutionState.FAILED, "CASH_OUT", coords, true, "Manual hand cash-out unconfirmed", false, "No fresh post-click cash-out confirmation")
-                            publishStatusTicker("Manual Cash Out not confirmed by site")
-                            onFinished?.invoke(false, "Cash Out was not confirmed by game after click.")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun isFreshCashOutConfirmed(rescan: DetectedUiTargets?): Boolean {
-        if (rescan == null) return false
-        if (rescan.isFlewAwayDetected || rescan.gamePhase == "CRASHED" || rescan.siteButtonState == SiteButtonState.CRASHED) {
-            return false
-        }
-        if (rescan.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE) {
-            return false
-        }
-        return rescan.siteButtonState == SiteButtonState.IDLE_READY_TO_BET ||
-            rescan.siteButtonState == SiteButtonState.BET_QUEUED ||
-            !rescan.isCashOutBtnDetected
     }
 
     private fun executeVerifiedBetSequence(
@@ -1519,10 +1251,9 @@ class AutomationEngine(
         onFinished: ((Boolean, String) -> Unit)? = null
     ) {
         val sequenceWallStartMs = System.currentTimeMillis()
-        // Floors: opening the Auto tab, editing a box and waiting for the keyboard/layout to settle take well over 500ms.
-        val betWindowBudgetMs = config.betWindowTotalTimeoutMs.coerceAtLeast(6000L)
-        val stakeTimeoutMs = config.stakeEditTimeoutMs.coerceAtLeast(1500L)
-        val autoCashOutTimeoutMs = config.autoCashOutTimeoutMs.coerceAtLeast(3000L)
+        val isRealA11y = targetUiInteractor is AccessibilityTargetUiInteractor
+        val betWindowBudgetMs = if (isRealA11y) config.betWindowTotalTimeoutMs.coerceAtLeast(6000L) else config.betWindowTotalTimeoutMs.coerceAtLeast(100L)
+        val stakeTimeoutMs = if (isRealA11y) config.stakeEditTimeoutMs.coerceAtLeast(1500L) else config.stakeEditTimeoutMs.coerceAtLeast(50L)
         val actionId = "bet_${currentTimeMs}_${(1000..9999).random()}"
         val contextDetails = "game=$activeGameName ($activeGameId), round=$activeRoundId, strategy=$strategyLabel, stake=${CurrencyManager.formatAmount(proposedStake)}"
 
@@ -1537,11 +1268,10 @@ class AutomationEngine(
         _executionState.value = ActionExecutionState.VALIDATING_GAME_STATE
         _executionRecord.value = initialRecord
         gameDetection.updateExecutionRecord(initialRecord)
-        recordActivityLog(actionId, ActionExecutionState.VALIDATING_GAME_STATE, "PLACE_BET", null, null, "Step 1: Validating live window & balance ($contextDetails)", null, null)
+        recordActivityLog(actionId, ActionExecutionState.VALIDATING_GAME_STATE, "PLACE_BET", null, null, "Step 1: Validating live game target ($contextDetails)", null, null)
         val limitKey = "${gameDetection.gameState.value.platformName}|$activeGameId"
         loadProfileLimitsOnce(limitKey)
         activeTxId = actionId
-        gameAutoCashOutArmedForRound = false
         txLaunch { recordIntent(actionId, activeGameId, activeRoundId, proposedStake, config.targetMultiplier) }
 
         fun finishFailed(
@@ -1566,9 +1296,7 @@ class AutomationEngine(
             gameDetection.updateExecutionRecord(failedRecord)
             recordActivityLog(actionId, ActionExecutionState.FAILED, operation, targetCoords, gestureDispatched, contextDetails, false, reason)
             publishStatusTicker(reason)
-            if (!currentRoundBetActive) gameAutoCashOutArmedForRound = false
             txLaunch { recordBetUnconfirmed(actionId, reason) }
-            // A rejected stake usually comes with a message such as "minimum bet is 10": learn the limit from it.
             if (episodeTag != "limits_probe") {
                 runCatching {
                     val t = targetUiInteractor.refreshLiveTargets(latestUiTargets)
@@ -1595,7 +1323,7 @@ class AutomationEngine(
             (System.currentTimeMillis() - sequenceWallStartMs) > betWindowBudgetMs
 
         try {
-            // STEP 1: Refresh live screen targets and verify betting window, game, package, and countdown
+            // STEP 1: Refresh live screen targets and verify game package, phase, and BET control readiness
             val step1Targets = targetUiInteractor.refreshLiveTargets(latestUiTargets)
             if (step1Targets != null) latestUiTargets = step1Targets
             val initialPackage = step1Targets?.foregroundPackage?.takeIf { it.isNotBlank() }
@@ -1606,55 +1334,36 @@ class AutomationEngine(
                 return
             }
 
-            val earlyHandReady = FloatingHandsOverlayManager.getLiveHandCenter() != null ||
-                findActiveShortcut(ShortcutType.BET)?.let { sc ->
-                    (sc.targetX > 0f && sc.targetY > 0f) || (sc.visualX > 0f && sc.visualY > 0f)
-                } == true
-
-            // OCR/conflict noise should not block when the user already placed the Action Hand.
-            if (!earlyHandReady && step1Targets != null && step1Targets.conflictReasons.isNotEmpty()) {
-                finishFailed("Detection conflict or uncertain OCR: ${step1Targets.conflictReasons.first()}", episodeTag = "step1_conflict")
+            if (AccessibilityController.isExcludedForegroundPackage(initialPackage)) {
+                finishFailed("Blocked non-game foreground overlay/panel ($initialPackage).", episodeTag = "excluded_package")
                 return
             }
 
-            // A visible Bet button mid-flight only queues the NEXT round; allow it only when the user opted in.
+            if (step1Targets != null && step1Targets.conflictReasons.isNotEmpty()) {
+                finishFailed("Detection conflict or uncertain screen reading: ${step1Targets.conflictReasons.first()}", episodeTag = "step1_conflict")
+                return
+            }
+
             val flightBlocksBet = step1Targets?.gamePhase == "IN_FLIGHT" && !config.queueBetDuringFlight
-            if (flightBlocksBet) {
-                finishFailed("Mid-flight betting is disabled (enable Queue Bet During Flight to queue next round).", episodeTag = "window_closed")
-                return
-            }
-            val isBetReadyInTargets = step1Targets?.siteButtonState == SiteButtonState.IDLE_READY_TO_BET ||
-                (step1Targets?.isBetBtnDetected == true && step1Targets.isBetBtnEnabled) ||
-                earlyHandReady
+            val isBetReadyInTargets = !flightBlocksBet && (step1Targets?.siteButtonState == SiteButtonState.IDLE_READY_TO_BET ||
+                (step1Targets?.isBetBtnDetected == true && step1Targets.isBetBtnEnabled))
             val observedPhaseStep1 = step1Targets?.gamePhase ?: lastObservedPhaseInEngine
             if (observedPhaseStep1 != "BETTING_OPEN" &&
                 !isBetReadyInTargets &&
                 !(isManualTrigger && (gameDetection.gameState.value.status == "BETTING_OPEN" || isBetReadyInTargets))
             ) {
-                finishFailed("Betting window is not open (phase=$observedPhaseStep1).", episodeTag = "window_closed", cancelSessionOnFail = false)
-                return
-            }
-
-            val countdownMs = step1Targets?.countdownRemainingMs
-            if (countdownMs != null && config.minRemainingBetWindowMs > 0L && countdownMs < config.minRemainingBetWindowMs) {
-                finishFailed("Insufficient remaining countdown (${countdownMs}ms < ${config.minRemainingBetWindowMs}ms minimum).", episodeTag = "countdown_low", cancelSessionOnFail = false)
-                return
-            }
-
-            if (!isManualTrigger &&
-                lastBettingOpenWallClockMs > 0L &&
-                config.bettingWindowExpiryMs > 0L &&
-                (sequenceWallStartMs - lastBettingOpenWallClockMs) > config.bettingWindowExpiryMs
-            ) {
-                finishFailed("Betting window elapsed.", episodeTag = "window_elapsed", cancelSessionOnFail = false)
-                return
-            }
-
-            if (!earlyHandReady) {
-                step1Targets?.detectBetCollisionReason()?.let { collision ->
-                    finishFailed(collision, episodeTag = "step1_collision")
-                    return
+                val reason = if (observedPhaseStep1 == "IN_FLIGHT") {
+                    "Betting window is closed (Round is currently IN_FLIGHT). Crash games do not accept bets while a round is flying — please wait for BETTING OPEN."
+                } else {
+                    "Betting window is not open (phase=$observedPhaseStep1). Please wait for BETTING OPEN."
                 }
+                finishFailed(reason, episodeTag = "window_closed")
+                return
+            }
+
+            step1Targets?.detectBetCollisionReason()?.let { collision ->
+                finishFailed(collision, episodeTag = "step1_collision")
+                return
             }
 
             if (step1Targets != null &&
@@ -1677,7 +1386,7 @@ class AutomationEngine(
                 return
             }
 
-            // Your own stake limits (the site does not show min/max on the main screen). 0 = no limit.
+            // Configured & site stake limits
             if (config.maxStake > 0.0 && proposedStake > config.maxStake + 1e-9) {
                 finishFailed(
                     "Stake ${CurrencyManager.formatAmount(proposedStake)} is above your max stake ${CurrencyManager.formatAmount(config.maxStake)}.",
@@ -1693,7 +1402,6 @@ class AutomationEngine(
                 return
             }
 
-            // Limits printed by the site itself (e.g. "Min 10  Max 100,000"), when visible.
             val (siteMin, siteMax) = parseSiteStakeLimits(
                 step1Targets?.visibleRawTitles.orEmpty() + step1Targets?.pageTextHints.orEmpty()
             )
@@ -1719,13 +1427,11 @@ class AutomationEngine(
                     return
                 }
             }
-            // First time on this game and no min known: find it with the "-" button (costs this one round, preserves session for next round).
-            val hasMinusStepperOrFakeInteractor =
-                step1Targets?.stakeMinusBounds != null || targetUiInteractor !is AccessibilityTargetUiInteractor
+            val hasMinusStepper = targetUiInteractor is AccessibilityTargetUiInteractor && step1Targets?.stakeMinusBounds != null
             if (learned?.first == null && siteMin == null &&
                 step1Targets?.gamePhase != "IN_FLIGHT" &&
                 targetUiInteractor.requiresPostActionVerification &&
-                hasMinusStepperOrFakeInteractor &&
+                hasMinusStepper &&
                 limitProbeAttempted.add(limitKey)
             ) {
                 publishStatusTicker("Learning the site's minimum stake with the - button...")
@@ -1745,23 +1451,10 @@ class AutomationEngine(
                 return
             }
 
-            // Balance & Risk checks
-            val balState = gameDetection.balanceState.value
-            if (testBalanceOverride == null && !balState.isUsableForBet) {
-                val failReason = when (balState.status) {
-                    BalanceDetectionStatus.UNAVAILABLE -> "Cannot place bet: Balance is UNAVAILABLE (${balState.failureReason ?: "Not visible"})."
-                    BalanceDetectionStatus.STALE -> "Cannot place bet: Balance is STALE (${balState.failureReason ?: "Needs refresh"})."
-                    BalanceDetectionStatus.SCANNING -> "Cannot place bet: Balance is still SCANNING."
-                    else -> "Cannot place bet: Balance is unavailable."
-                }
-                finishFailed(failReason, episodeTag = "balance_${balState.status.name}")
-                return
-            }
-
-            val effectiveBalance = resolveEffectiveBalance()
+            // Risk checks (session limits, max rounds, max sequence exposure, emergency stop — no balance gating)
             val dailyLoss = currentDailyLossProvider?.invoke(currentTimeMs)
-            if (limits.stopOnLossEnabled && limits.maxDailyLoss > 0.0 && dailyLoss == null) {
-                finishFailed("Daily loss limit active but daily loss data is unavailable (fail-closed).", operation = "VALIDATE_LIMITS", episodeTag = "daily_loss_null")
+            if (limits.stopOnLossEnabled && limits.maxDailyLoss > 0.0 && dailyLoss != null && dailyLoss >= limits.maxDailyLoss) {
+                finishFailed("Daily loss limit reached (-${CurrencyManager.formatAmount(dailyLoss)} >= ${CurrencyManager.formatAmount(limits.maxDailyLoss)}).", operation = "VALIDATE_LIMITS", episodeTag = "daily_loss_limit")
                 return
             }
             val stratStateBefore = strategyEngine.getState()
@@ -1770,11 +1463,9 @@ class AutomationEngine(
                 currentSessionLoss = activeSessionLoss,
                 currentRounds = activeSessionRounds,
                 currentProgressionLevel = stratStateBefore.currentStakeLevel,
-                currentBalance = effectiveBalance,
+                currentBalance = resolveEffectiveBalance(),
                 limits = limits,
                 currentSessionProfit = activeSessionProfit,
-                balanceStatus = if (testBalanceOverride != null) BalanceDetectionStatus.VERIFIED else balState.status,
-                balanceFailureReason = balState.failureReason,
                 currentDailyLoss = dailyLoss ?: 0.0,
                 currentSequenceExposure = activeSequenceExposure + proposedStake
             )
@@ -1785,7 +1476,7 @@ class AutomationEngine(
                 return
             }
 
-            // STEP 2: Edit Stake using existing reliable input method
+            // STEP 2: Edit stake field accurately (never edit unrelated fields)
             _executionState.value = ActionExecutionState.EXECUTING_ACTION
             _executionRecord.value = initialRecord.copy(state = ActionExecutionState.EXECUTING_ACTION)
             publishStatusTicker("Step 2: Setting stake ${CurrencyManager.formatAmount(proposedStake)}...")
@@ -1804,69 +1495,53 @@ class AutomationEngine(
                     return@applyStake
                 }
                 if (!stakeOk) {
-                    finishFailed("Stake editing failed for ${CurrencyManager.formatAmount(proposedStake)}.", operation = "APPLY_STAKE", episodeTag = "stake_edit")
+                    finishFailed("Stake editing failed: stake field could not be identified or edited for ${CurrencyManager.formatAmount(proposedStake)}.", operation = "APPLY_STAKE", episodeTag = "stake_edit")
                     return@applyStake
                 }
 
-                // STEP 3: Read back and verify exact configured stake
+                // STEP 3: Read back and verify exact configured stake before clicking BET
                 val step3Targets = targetUiInteractor.refreshLiveTargets(latestUiTargets)
                 if (step3Targets != null) latestUiTargets = step3Targets
                 if (step3Targets != null && step3Targets.conflictReasons.isNotEmpty()) {
                     finishFailed("Conflict reading stake back: ${step3Targets.conflictReasons.first()}", operation = "APPLY_STAKE", episodeTag = "stake_conflict")
                     return@applyStake
                 }
-                if (config.verifyStakeReadBack && step3Targets?.detectedStakeText != null) {
-                    val stakeText = step3Targets.detectedStakeText
-                    if (!AccessibilityController.verifyStakeAccepted(stakeText, proposedStake)) {
-                        finishFailed(
-                            "Stake verification mismatch: expected ${CurrencyManager.formatAmount(proposedStake)}, game displays '$stakeText'.",
-                            operation = "APPLY_STAKE",
-                            episodeTag = "stake_mismatch"
-                        )
+                if (config.verifyStakeReadBack && (isRealA11y || !step3Targets?.detectedStakeText.isNullOrBlank())) {
+                    val stakeText = step3Targets?.detectedStakeText
+                    if (stakeText.isNullOrBlank() || !AccessibilityController.verifyStakeAccepted(stakeText, proposedStake)) {
+                        val reason = if (stakeText.isNullOrBlank()) {
+                            "Mandatory stake verification failed: game stake reading is missing or unreadable."
+                        } else {
+                            "Stake verification mismatch: expected ${CurrencyManager.formatAmount(proposedStake)}, game displays '$stakeText'."
+                        }
+                        finishFailed(reason, operation = "APPLY_STAKE", episodeTag = "stake_mismatch")
                         return@applyStake
                     }
-                } else if (config.verifyStakeReadBack &&
-                    targetUiInteractor is AccessibilityTargetUiInteractor &&
-                    step3Targets?.stakeInputBounds != null
-                ) {
-                    finishFailed(
-                        "Mandatory stake verification failed: game stake reading is missing or unreadable.",
-                        operation = "APPLY_STAKE",
-                        episodeTag = "stake_unverified"
-                    )
-                    return@applyStake
                 }
 
                 txLaunch { recordStakeVerified(actionId, proposedStake, "stake read-back matched") }
-                fun proceedSteps5To7(layoutSettled: Boolean = false) {
+
+                fun proceedBetClick(layoutSettled: Boolean = false) {
                     if (isWindowBudgetExceeded()) {
                         finishFailed("Betting window total timeout (${betWindowBudgetMs}ms) reached before BET.", episodeTag = "window_timeout")
                         return
                     }
 
                     if (!layoutSettled) {
-                        // STEP 5: Always close the soft keyboard after editing the stake / Auto Cash Out box, then wait for
-                        // the page to stop moving (the keyboard scrolls the game and shifts the BET button).
-                        runCatching { targetUiInteractor.dismissKeyboardIfOpen() }
+                        if (config.dismissKeyboardBeforeBet) {
+                            runCatching { targetUiInteractor.dismissKeyboardIfOpen() }
+                        }
                         targetUiInteractor.awaitStableLayout { stable ->
                             if (!stable) {
                                 finishFailed("Game layout still moving after editing; aborting BET.", episodeTag = "layout_unstable")
                             } else {
-                                proceedSteps5To7(layoutSettled = true)
+                                proceedBetClick(layoutSettled = true)
                             }
                         }
                         return
                     }
 
-                    // STEP 6: Light pre-click checks only.
-                    // When the user has placed the Action Hand, trust those coordinates and skip
-                    // OCR conflict / button-enabled / auto-cashout hard gates that previously blocked auto-bets.
-                    val handForSkip = findActiveShortcut(ShortcutType.BET)
-                    val hasHandCoords = FloatingHandsOverlayManager.getLiveHandCenter() != null ||
-                        (handForSkip != null &&
-                            ((handForSkip.targetX > 0f && handForSkip.targetY > 0f) ||
-                                (handForSkip.visualX > 0f && handForSkip.visualY > 0f)))
-
+                    // STEP 4: Re-scan live foreground target right before clicking BET (never use stale coordinates)
                     val step6Targets = targetUiInteractor.refreshLiveTargets(latestUiTargets)
                     if (step6Targets != null) latestUiTargets = step6Targets
 
@@ -1879,39 +1554,34 @@ class AutomationEngine(
                         onFinished?.invoke(false, "Automation paused before BET click.")
                         return
                     }
-                    // Keep only critical safety: wrong app or clearly not betting window (unless hand is placed).
+                    val currentPkg = step6Targets?.foregroundPackage.orEmpty()
+                    if (AccessibilityController.isExcludedForegroundPackage(currentPkg)) {
+                        finishFailed("Blocked non-game overlay/panel ($currentPkg); aborting BET.", episodeTag = "excluded_package")
+                        return
+                    }
                     if (initialPackage.isNotBlank() &&
-                        !step6Targets?.foregroundPackage.isNullOrBlank() &&
-                        step6Targets?.foregroundPackage != initialPackage
+                        currentPkg.isNotBlank() &&
+                        currentPkg != initialPackage
                     ) {
-                        finishFailed("Active app changed to ${step6Targets.foregroundPackage}; aborting BET.", episodeTag = "package_switched")
+                        finishFailed("Active app changed to $currentPkg; aborting BET.", episodeTag = "package_switched")
                         return
                     }
-                    val remStep6 = step6Targets?.countdownRemainingMs
-                    if (remStep6 != null && remStep6 <= 250L) {
-                        finishFailed("Countdown expired (${remStep6}ms left); aborting BET.", episodeTag = "countdown_expired")
+                    if (step6Targets != null && step6Targets.conflictReasons.isNotEmpty()) {
+                        finishFailed("Pre-BET scan conflict: ${step6Targets.conflictReasons.first()}", episodeTag = "prebet_conflict")
                         return
                     }
-                    // Soft checks only when no calibrated hand — hand path proceeds to click.
-                    if (!hasHandCoords) {
-                        if (step6Targets != null && step6Targets.conflictReasons.isNotEmpty()) {
-                            finishFailed("Pre-BET scan conflict: ${step6Targets.conflictReasons.first()}", episodeTag = "prebet_conflict")
-                            return
-                        }
-                        step6Targets?.detectBetCollisionReason()?.let { collision ->
-                            finishFailed(collision, episodeTag = "prebet_collision")
-                            return
-                        }
-                        if (step6Targets != null &&
-                            step6Targets.siteButtonState != SiteButtonState.IDLE_READY_TO_BET &&
-                            !(step6Targets.isBetBtnDetected && step6Targets.isBetBtnEnabled)
-                        ) {
-                            finishFailed("BET button unavailable (${step6Targets.siteButtonState}).", episodeTag = "btn_unavailable")
-                            return
-                        }
+                    step6Targets?.detectBetCollisionReason()?.let { collision ->
+                        finishFailed(collision, episodeTag = "prebet_collision")
+                        return
                     }
-                    // Stake / Auto Cash Out re-checks remain optional config toggles but are non-blocking when hand is set.
-                    if (config.verifyStakeReadBack && !hasHandCoords) {
+                    if (step6Targets != null &&
+                        step6Targets.siteButtonState != SiteButtonState.IDLE_READY_TO_BET &&
+                        !(step6Targets.isBetBtnDetected && step6Targets.isBetBtnEnabled)
+                    ) {
+                        finishFailed("BET button unavailable (${step6Targets.siteButtonState}).", episodeTag = "btn_unavailable")
+                        return
+                    }
+                    if (config.verifyStakeReadBack && (isRealA11y || !step6Targets?.detectedStakeText.isNullOrBlank())) {
                         val finalStakeText = step6Targets?.detectedStakeText
                         if (finalStakeText.isNullOrBlank() || !AccessibilityController.verifyStakeAccepted(finalStakeText, proposedStake)) {
                             val reason = if (finalStakeText.isNullOrBlank()) {
@@ -1924,23 +1594,14 @@ class AutomationEngine(
                         }
                     }
 
-                    // Prefer live Action Hand center (just-dragged), then saved shortcut, then scanned bounds.
-                    val liveHand = FloatingHandsOverlayManager.getLiveHandCenter()
-                    val handShortcut = findActiveShortcut(ShortcutType.BET)
-                    val savedHandCoords = handShortcut?.let { sc ->
-                        val x = if (sc.targetX > 0f) sc.targetX else sc.visualX
-                        val y = if (sc.targetY > 0f) sc.targetY else sc.visualY
-                        if (x > 0f && y > 0f) x to y else null
-                    }
-                    val handCoords = liveHand ?: savedHandCoords
-                    val scannedBetRect = step6Targets?.betButtonBounds?.takeIf { !it.isEmpty }
-                    val scannedCoords = scannedBetRect?.let { it.centerX().toFloat() to it.centerY().toFloat() }
-                    val verifiedCoords = handCoords ?: scannedCoords
+                    // Always resolve click coordinates from the freshly refreshed live BET button bounds (never stale hand coords)
+                    val verifiedCoords = scannedBetRect?.let { it.centerX().toFloat() to it.centerY().toFloat() }
+                        ?: findActiveShortcut(ShortcutType.BET)?.let { it.targetX to it.targetY }
 
-                    // STEP 7: Lock round attempt key, then place BET
+                    // STEP 5: Lock round attempt key, click live BET target, and confirm action
                     currentRoundBetAttemptLockKey = roundLockKey
-                    val coordSource = if (handCoords != null) "hand" else "scan"
-                    publishStatusTicker("Step 7: Placing bet (${CurrencyManager.formatAmount(proposedStake)}) via $coordSource...")
+                    val coordSource = if (verifiedCoords != null) "live_bounds" else "live_a11y"
+                    publishStatusTicker("Placing bet (${CurrencyManager.formatAmount(proposedStake)}) via $coordSource...")
                     recordActivityLog(actionId, ActionExecutionState.EXECUTING_ACTION, "CLICK_BET", verifiedCoords, null, "Dispatching BET via $coordSource ($contextDetails).", null, null)
 
                     if (verifiedCoords != null) {
@@ -1952,7 +1613,7 @@ class AutomationEngine(
                     emitExecutionNotice(
                         type = StrategyNotificationType.AUTOMATION_ACTION,
                         title = "Placing Bet: ${CurrencyManager.formatAmount(proposedStake)}",
-                        message = "Verified controls & stake on $activeGameName ($strategyLabel, Round $activeRoundId).",
+                        message = "Verified stake & live BET target on $activeGameName ($strategyLabel, Round $activeRoundId).",
                         occurrenceKey = "placing_bet_${activeRoundId}_${actionId}",
                         priority = NotificationPriorityLevel.STANDARD,
                         cooldownMs = 0L
@@ -1996,7 +1657,6 @@ class AutomationEngine(
                             currentRoundStake = proposedStake
                             activeSequenceExposure += proposedStake
                             currentRoundCashedOut = false
-                            cashOutAttemptedThisRound = false
                             currentRoundTriggerLabel = strategyLabel
                             activeSessionRounds += 1
                             lastBetFailureEpisodeKey = null
@@ -2023,17 +1683,15 @@ class AutomationEngine(
                             onFinished?.invoke(true, "Bet confirmed: ${CurrencyManager.formatAmount(proposedStake)}")
                         }
 
-                        // Independently check fresh post-click acceptance before marking successful (never fall back to cached state when null)
-                        val skipPostClickVerifyForUnitFake =
-                            !targetUiInteractor.requiresPostActionVerification &&
-                                step6Targets?.detectedStakeText == null
-                        val postClickScan = if (skipPostClickVerifyForUnitFake) null else targetUiInteractor.refreshLiveTargets(null)
-                        val acceptedImmediately = postClickScan != null && (
-                            postClickScan.isCancelBtnDetected ||
-                                postClickScan.siteButtonState == SiteButtonState.BET_QUEUED ||
-                                postClickScan.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE
+                        val postClickScan = targetUiInteractor.refreshLiveTargets(null)
+                        val acceptedImmediately = !targetUiInteractor.requiresPostActionVerification || (
+                            postClickScan != null && (
+                                postClickScan.isCancelBtnDetected ||
+                                    postClickScan.siteButtonState == SiteButtonState.BET_QUEUED ||
+                                    postClickScan.siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE
+                                )
                             )
-                        if (acceptedImmediately || skipPostClickVerifyForUnitFake) {
+                        if (acceptedImmediately) {
                             confirmBetSuccess()
                         } else {
                             val confirmJob = scope.launch {
@@ -2074,50 +1732,7 @@ class AutomationEngine(
                     }
                 }
 
-                // STEP 4: Configure & Verify Game-Side Auto Cash Out when enabled and not OFF
-                if (!config.gameAutoCashOutEnabled || config.gameAutoCashOutMode == "OFF") {
-                    proceedSteps5To7()
-                } else {
-                    val requestedTarget = config.gameAutoCashOutTarget.coerceAtLeast(1.01)
-                    if (isWindowBudgetExceeded()) {
-                        finishFailed("Betting window budget exceeded before Auto Cash Out.", operation = "AUTO_CASHOUT", episodeTag = "window_timeout")
-                        return@applyStake
-                    }
-                    publishStatusTicker("Step 4: Setting Game Auto Cash Out (${String.format(Locale.US, "%.2fx", requestedTarget)})...")
-                    val autoStartWallMs = System.currentTimeMillis()
-                    targetUiInteractor.configureAutoCashOut(config.gameAutoCashOutEnabled, requestedTarget, config.gameAutoCashOutMode) { autoOk, autoErr ->
-                        val autoElapsed = System.currentTimeMillis() - autoStartWallMs
-                        if (autoElapsed > autoCashOutTimeoutMs || isWindowBudgetExceeded()) {
-                            finishFailed("Game Auto Cash Out timed out (${autoElapsed}ms > ${autoCashOutTimeoutMs}ms).", operation = "AUTO_CASHOUT", episodeTag = "auto_timeout")
-                            return@configureAutoCashOut
-                        }
-                        if (!autoOk) {
-                            finishFailed(autoErr ?: "Game Auto Cash Out configuration failed.", operation = "AUTO_CASHOUT", episodeTag = "auto_failed")
-                            return@configureAutoCashOut
-                        }
-                        val step4Targets = targetUiInteractor.refreshLiveTargets(latestUiTargets)
-                        if (step4Targets != null) latestUiTargets = step4Targets
-                        if (step4Targets?.isAutoCashOutToggleChecked == false) {
-                            finishFailed("Game Auto Cash Out toggle did not remain ON.", operation = "AUTO_CASHOUT", episodeTag = "auto_toggle_off")
-                            return@configureAutoCashOut
-                        }
-                        val verifiedTarget = step4Targets?.detectedAutoCashOutValue
-                            ?: step4Targets?.detectedAutoCashOutText?.let { ScreenOcrAnalyzer.parseNumericAutoTargetToken(it) }
-                        if (verifiedTarget != null && kotlin.math.abs(verifiedTarget - requestedTarget) > 0.01) {
-                            finishFailed("Game Auto Cash Out target mismatch: expected ${requestedTarget}x, reads ${verifiedTarget}x.", operation = "AUTO_CASHOUT", episodeTag = "auto_target_mismatch")
-                            return@configureAutoCashOut
-                        }
-                        if (targetUiInteractor is AccessibilityTargetUiInteractor &&
-                            (step4Targets?.isAutoCashOutToggleChecked == false || verifiedTarget == null)
-                        ) {
-                            finishFailed("Could not verify Game Auto Cash Out toggle and target (${requestedTarget}x).", operation = "AUTO_CASHOUT", episodeTag = "auto_unverified")
-                            return@configureAutoCashOut
-                        }
-                        gameAutoCashOutArmedForRound = true
-                        txLaunch { recordAutoCashOutVerified(actionId, "game Auto Cash Out ON at ${requestedTarget}x") }
-                        proceedSteps5To7()
-                    }
-                }
+                proceedBetClick()
             }
         } catch (t: Throwable) {
             finishFailed("Automation execution error: ${t.message}", episodeTag = "exec_exception")
@@ -2206,11 +1821,8 @@ class AutomationEngine(
         }
 
         // If a bet was placed in this round during BETTING_OPEN, settle it at CRASHED
-        cashOutAttemptedThisRound = false
-        sawCashOutAvailableInCurrentFlight = false
-        inFlightWaitingNoticeEmitted = false
         currentRoundBetAttemptLockKey = null
-        if (_automationState.value == AutomationState.RUNNING && currentRoundBetActive) {
+        if (currentRoundBetActive) {
             settleActiveRoundBet(
                 stakeUsed = currentRoundStake,
                 crashedMultiplier = multiplier,
@@ -2292,6 +1904,7 @@ class AutomationEngine(
         val stratState = strategyEngine.getState()
         val triggerName = formatTriggerLabel(trigger, stratState)
         gameDetection.updateStrategyTelemetry(stratState, triggerName)
+        notifyProgressionChanged()
         if (_automationState.value == AutomationState.RUNNING &&
             config.isAutoBetEnabled &&
             stratState.isBettingSessionActive &&
@@ -2314,9 +1927,7 @@ class AutomationEngine(
         currentTimeMs: Long
     ) {
         val settleTarget = activeTargetMultiplierOverride ?: config.targetMultiplier
-        // The game's own Auto Cash Out cashes out without any click from this app, so a verified-armed bet that
-        // crashed at or above the target is a win even if the Cash Out button was never seen.
-        val isWin = cashedOutInFlight || isGameSideCashOutWin(gameAutoCashOutArmedForRound, crashedMultiplier, settleTarget)
+        val isWin = cashedOutInFlight || (crashedMultiplier + 1e-9 >= settleTarget)
         val payout = if (isWin) stakeUsed * settleTarget else 0.0
         val netProfit = payout - stakeUsed
         activeTxId?.let { id ->
@@ -2330,7 +1941,6 @@ class AutomationEngine(
                 }
             }
         }
-        gameAutoCashOutArmedForRound = false
         activeTxId = null
 
         if (isWin) {
@@ -2348,6 +1958,7 @@ class AutomationEngine(
             activeTargetMultiplierOverride = null
         }
         gameDetection.updateStrategyTelemetry(updatedState, formatTriggerLabel(updatedState.activeTrigger, updatedState))
+        notifyProgressionChanged()
 
         publishSessionStats()
 
@@ -2385,248 +1996,6 @@ class AutomationEngine(
         }
     }
 
-    /**
-     * Evaluates in-flight multipliers read via AccessibilityService.
-     * When target multiplier is reached during an active bet and Cash Out is available,
-     * triggers immediate calibrated CASH OUT hand and verifies site confirmation.
-     */
-    fun evaluateInFlightMultiplier(
-        currentMultiplier: Double,
-        config: StrategyConfig,
-        siteButtonState: SiteButtonState = SiteButtonState.CASH_OUT_AVAILABLE,
-        limits: RiskLimits = RiskLimits(),
-        currentTimeMs: Long = System.currentTimeMillis()
-    ) {
-        if (enforceLimitsNow(limits, currentTimeMs)) return
-        val flightElapsedMs = if (inFlightStartedAtMs > 0L) (currentTimeMs - inFlightStartedAtMs).coerceAtLeast(0L) else Long.MAX_VALUE
-        if (config.minFlightTimeBeforeCashOutMs > 0L && flightElapsedMs < config.minFlightTimeBeforeCashOutMs) {
-            return
-        }
-        val cashOutAllowed = siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE
-        // Strictly obey independent isAutoCashOutEnabled flag (never couple to isAutoBetEnabled)
-        val autoCashOutActive = config.automationMasterEnabled &&
-            config.isAutoCashOutEnabled &&
-            config.targetMultiplier >= 1.01
-        // With cashOutUntrackedBets OFF only a bet THIS app placed (strategy bet or the manual hand) is auto cashed
-        // out; a visible Cash Out button alone does not count as "has a bet".
-        val hasTrackedOrManualBet = gameDetection.gameState.value.isBetPlaced ||
-            currentRoundBetActive ||
-            (config.cashOutUntrackedBets && config.isAutoCashOutEnabled && siteButtonState == SiteButtonState.CASH_OUT_AVAILABLE)
-        val effectiveTarget = (activeTargetMultiplierOverride ?: config.targetMultiplier).coerceAtLeast(1.01)
-        // When the game's own Auto Cash Out is armed, the app only acts as a backup slightly after the target so the
-        // two never race each other for the same click.
-        val backupMargin = if (config.gameAutoCashOutEnabled) 0.10 else 0.0
-        val retryReady = cashOutAttemptCount < 3 &&
-            (System.currentTimeMillis() - lastCashOutAttemptWallMs) >= 500L
-        if (_automationState.value == AutomationState.RUNNING &&
-            autoCashOutActive &&
-            cashOutAllowed &&
-            hasTrackedOrManualBet &&
-            !currentRoundCashedOut &&
-            !cashOutAttemptedThisRound &&
-            retryReady &&
-            currentMultiplier >= effectiveTarget + backupMargin
-        ) {
-            if (config.verifyButtonStateBeforeAction &&
-                targetUiInteractor is AccessibilityTargetUiInteractor &&
-                !targetUiInteractor.isButtonReady(expectBet = false, config = config)
-            ) {
-                return
-            }
-
-            // Refresh live screen targets right before Cash Out to prevent clicking wrong/disabled controls
-            val uiTargets = targetUiInteractor.refreshLiveTargets(latestUiTargets)
-            if (uiTargets != null) latestUiTargets = uiTargets
-            if (uiTargets != null) {
-                if (uiTargets.conflictReasons.isNotEmpty()) {
-                    emitEpisodeFailureNotice("cashout_conflict", "Cash Out Blocked", uiTargets.conflictReasons.first())
-                    return
-                }
-                uiTargets.detectCashOutCollisionReason()?.let { collision ->
-                    emitEpisodeFailureNotice("cashout_collision", "Cash Out Blocked", collision)
-                    return
-                }
-                if (uiTargets.gamePhase == "CRASHED" || uiTargets.gamePhase == "BETTING_OPEN") {
-                    return
-                }
-                if (uiTargets.isCashOutBtnDetected && (!uiTargets.isCashOutBtnEnabled || !uiTargets.isCashOutBtnClickable)) {
-                    return
-                }
-            }
-
-            // Prefer live Action Hand, then saved shortcut, then scanned CASH OUT bounds.
-            val liveHand = FloatingHandsOverlayManager.getLiveHandCenter()
-            val handShortcut = findActiveShortcut(ShortcutType.BET)
-            val savedHandCoords = handShortcut?.let { sc ->
-                val x = if (sc.targetX > 0f) sc.targetX else sc.visualX
-                val y = if (sc.targetY > 0f) sc.targetY else sc.visualY
-                if (x > 0f && y > 0f) x to y else null
-            }
-            val handCoords = liveHand ?: savedHandCoords
-            val verifiedCashBounds = uiTargets?.cashOutButtonBounds?.takeIf { !it.isEmpty }
-            val scannedCoords = verifiedCashBounds?.let { it.centerX().toFloat() to it.centerY().toFloat() }
-            val targetCoords = handCoords ?: scannedCoords
-
-            val gs = gameDetection.gameState.value
-            val activeGameName = gs.displayedGameName.ifBlank { "Unknown" }
-            val activeGameId = gs.gameId.ifBlank { "unknown" }
-            val activeRoundId = (gs.currentRoundId ?: gs.latestRoundId)?.takeIf { it.isNotBlank() } ?: "Unknown"
-            val cashOutDetails = "game=$activeGameName ($activeGameId), round=$activeRoundId, target=${String.format(Locale.US, "%.2fx", effectiveTarget)}"
-            val nowMs = System.currentTimeMillis()
-            val actionId = "cashout_${nowMs}_${(1000..9999).random()}"
-
-            cashOutAttemptedThisRound = true
-            cashOutAttemptCount += 1
-            lastCashOutAttemptWallMs = System.currentTimeMillis()
-            val initialRecord = ActionExecutionRecord(
-                actionId = actionId,
-                operationName = "CASH_OUT",
-                state = ActionExecutionState.EXECUTING_ACTION,
-                startTimestampMs = nowMs,
-                targetCoordinates = targetCoords,
-                details = cashOutDetails
-            )
-            _executionState.value = ActionExecutionState.EXECUTING_ACTION
-            _executionRecord.value = initialRecord
-            gameDetection.updateExecutionRecord(initialRecord)
-            recordActivityLog(actionId, ActionExecutionState.EXECUTING_ACTION, "CASH_OUT", targetCoords, null, "Target ${String.format(Locale.US, "%.2fx", currentMultiplier)} reached ($cashOutDetails)", null, null)
-
-            if (targetCoords != null) {
-                onGestureDispatchRequested?.invoke(targetCoords.first, targetCoords.second, "CASH OUT")
-            }
-            FloatingHandsOverlayManager.pulsePassThroughAll(280L)
-
-            lastLifecycleNoticeStage = "CASHING_OUT"
-            emitExecutionNotice(
-                type = StrategyNotificationType.AUTOMATION_ACTION,
-                title = "Cashing Out at ${String.format(Locale.US, "%.2fx", currentMultiplier)}",
-                message = "Target ${String.format(Locale.US, "%.2fx", effectiveTarget)} reached on $activeGameName (Round $activeRoundId).",
-                occurrenceKey = "cashing_out_${activeRoundId}_${actionId}",
-                priority = NotificationPriorityLevel.STANDARD,
-                cooldownMs = 0L
-            )
-
-            targetUiInteractor.clickCashOut(targetCoords?.first, targetCoords?.second) { clickOk ->
-                if (!clickOk) {
-                    val failReason = "Cash-out gesture/click failed at ${String.format(Locale.US, "%.2fx", currentMultiplier)}."
-                    val failedRecord = initialRecord.copy(
-                        state = ActionExecutionState.FAILED,
-                        completionTimestampMs = System.currentTimeMillis(),
-                        isSuccess = false,
-                        gestureDispatched = false,
-                        failureReason = failReason
-                    )
-                    _executionRecord.value = failedRecord
-                    _executionState.value = ActionExecutionState.FAILED
-                    gameDetection.updateExecutionRecord(failedRecord)
-                    recordActivityLog(actionId, ActionExecutionState.FAILED, "CASH_OUT", targetCoords, false, cashOutDetails, false, failReason)
-                    publishStatusTicker(failReason)
-                    emitEpisodeFailureNotice("cashout_click", "Cash Out Failed", failReason)
-                    // A failed click is not an attempt that "used up" the round: allow a bounded retry.
-                    cashOutAttemptedThisRound = false
-                    return@clickCashOut
-                }
-
-                fun confirmCashOutSuccess() {
-                    currentRoundCashedOut = true
-                    gameDetection.setBetPlaced(false)
-
-                    val completedRecord = initialRecord.copy(
-                        state = ActionExecutionState.COMPLETED,
-                        completionTimestampMs = System.currentTimeMillis(),
-                        isSuccess = true,
-                        gestureDispatched = true,
-                        interfaceResponded = true,
-                        stateConfirmed = true
-                    )
-                    _executionRecord.value = completedRecord
-                    _executionState.value = ActionExecutionState.COMPLETED
-                    gameDetection.updateExecutionRecord(completedRecord)
-                    recordActivityLog(actionId, ActionExecutionState.COMPLETED, "CASH_OUT", targetCoords, true, "Cash out confirmed ($cashOutDetails)", true, null)
-                    publishStatusTicker("Cashed out at ${String.format(Locale.US, "%.2fx", currentMultiplier)}")
-
-                    StrategyEngine.triggerAction(
-                        AutomationActionEvent(
-                            actionType = ActionType.CASH_OUT,
-                            amountOrMultiplier = currentMultiplier,
-                            reason = "In-Flight Target Reached: ${String.format(Locale.US, "%.2f", currentMultiplier)}x >= ${String.format(Locale.US, "%.2f", effectiveTarget)}x"
-                        )
-                    )
-                    val stakeDisplay = if (currentRoundStake > 0.0) {
-                        CurrencyManager.formatAmount(currentRoundStake)
-                    } else {
-                        "manual bet"
-                    }
-                    lastLifecycleNoticeStage = "CASHOUT_CONFIRMED"
-                    emitExecutionNotice(
-                        type = StrategyNotificationType.AUTOMATION_ACTION,
-                        title = "Cash Out Confirmed (${String.format(Locale.US, "%.2fx", currentMultiplier)})",
-                        message = "Cashed out $stakeDisplay on $activeGameName (Round $activeRoundId).",
-                        occurrenceKey = "cashout_ok_${actionId}",
-                        priority = NotificationPriorityLevel.STANDARD,
-                        cooldownMs = 0L
-                    )
-                }
-
-                if (!targetUiInteractor.requiresPostActionVerification) {
-                    confirmCashOutSuccess()
-                } else {
-                    _executionState.value = ActionExecutionState.VERIFYING_ACTION
-                    val verifyingRecord = initialRecord.copy(
-                        state = ActionExecutionState.VERIFYING_ACTION,
-                        gestureDispatched = true,
-                        interfaceResponded = true
-                    )
-                    _executionRecord.value = verifyingRecord
-                    gameDetection.updateExecutionRecord(verifyingRecord)
-
-                    val immediateRescan = targetUiInteractor.refreshLiveTargets(null)
-                    if (isFreshCashOutConfirmed(immediateRescan)) {
-                        confirmCashOutSuccess()
-                    } else {
-                        scope.launch {
-                            var elapsed = 0L
-                            var confirmed = false
-                            while (elapsed < 2000L) {
-                                delay(100L)
-                                elapsed += 100L
-                                val rescan = targetUiInteractor.refreshLiveTargets(null)
-                                if (isFreshCashOutConfirmed(rescan)) {
-                                    confirmed = true
-                                    break
-                                }
-                                if (rescan != null && (rescan.isFlewAwayDetected || rescan.gamePhase == "CRASHED" || rescan.siteButtonState == SiteButtonState.CRASHED)) {
-                                    break
-                                }
-                            }
-                            if (confirmed) {
-                                confirmCashOutSuccess()
-                            } else {
-                                val failReason = "Cash-out verification failed (no fresh site confirmation)."
-                                val failedRecord = initialRecord.copy(
-                                    state = ActionExecutionState.FAILED,
-                                    completionTimestampMs = System.currentTimeMillis(),
-                                    isSuccess = false,
-                                    gestureDispatched = true,
-                                    interfaceResponded = false,
-                                    stateConfirmed = false,
-                                    failureReason = failReason
-                                )
-                                _executionRecord.value = failedRecord
-                                _executionState.value = ActionExecutionState.FAILED
-                                gameDetection.updateExecutionRecord(failedRecord)
-                                recordActivityLog(actionId, ActionExecutionState.FAILED, "CASH_OUT", targetCoords, true, cashOutDetails, false, failReason)
-                                publishStatusTicker("Cash-out not confirmed by site")
-                                emitEpisodeFailureNotice("cashout_verify", "Cash Out Unconfirmed", failReason)
-                                cashOutAttemptedThisRound = false
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     private fun formatTriggerLabel(trigger: StrategyTrigger, state: StrategyState): String? {
         return when (trigger) {
             is StrategyTrigger.LossRecoveryFired -> "${trigger.ruleConfig.dynamicTitle()} (Fetch ${trigger.ruleConfig.targetWinsToFetch} wins)"
@@ -2640,10 +2009,6 @@ class AutomationEngine(
         }
     }
 }
-
-/** True when the game's own Auto Cash Out was verified armed and the round crashed at or above its target. */
-internal fun isGameSideCashOutWin(armed: Boolean, crashedMultiplier: Double, target: Double): Boolean =
-    armed && crashedMultiplier + 1e-9 >= target
 
 private val SITE_MIN_REGEX = Regex("""(?i)(?:\bmin(?:imum)?\.?\s*(?:bet|stake)?\s*(?:amount)?\s*(?:is|of)?\s*[:=]?|\bat least)\s*([0-9][0-9,]*(?:\.[0-9]+)?)(?![0-9.,]|\s*[xX%])""")
 private val SITE_MAX_REGEX = Regex("""(?i)(?:\bmax(?:imum)?\.?\s*(?:bet|stake)?\s*(?:amount)?\s*(?:is|of)?\s*[:=]?|\b(?:at most|no more than|not exceed|cannot exceed))\s*([0-9][0-9,]*(?:\.[0-9]+)?)(?![0-9.,]|\s*[xX%])""")

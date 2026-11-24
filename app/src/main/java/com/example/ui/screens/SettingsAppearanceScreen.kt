@@ -120,7 +120,8 @@ fun SettingsAppearanceScreen(
     onClearHistoryByScope: ((ClearHistoryScope, String) -> Unit)? = null,
     selectedGameId: String = "unknown",
     onOpenHandSettings: (() -> Unit)? = null,
-    onToggleActionHand: (() -> Unit)? = null
+    onToggleActionHand: (() -> Unit)? = null,
+    onResetProgression: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val prefs = remember {
@@ -306,17 +307,17 @@ fun SettingsAppearanceScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = "Action Hand Settings", tint = PrimaryCobalt)
+                    Icon(Icons.Default.PlayArrow, contentDescription = "BET Hand Settings", tint = PrimaryCobalt)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "ACTION HAND SETTINGS (AUTHORITATIVE)",
+                        text = "BET HAND SETTINGS (AUTHORITATIVE)",
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp,
                         color = PrimaryCobalt
                     )
                 }
                 Text(
-                    text = "Bet Mode, Base Stake, Stake Verification, Game-Side Auto Cash Out, Cash Out Mode, Target Multiplier, and Min Flight Time are configured in Dedicated Hand Settings (double-tap or long-press the Action Hand).",
+                    text = "Bet Mode, Base Stake, Stake Verification, and Win Target Multiplier are configured in Dedicated Hand Settings (double-tap or long-press the BET Hand). Cash Out is left to the game.",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -329,19 +330,14 @@ fun SettingsAppearanceScreen(
                         modifier = Modifier.padding(10.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        val gameAutoLabel = if (incomingConfig.gameAutoCashOutEnabled) {
-                            "ON (${String.format(Locale.US, "%.2fx", incomingConfig.gameAutoCashOutTarget)})"
-                        } else {
-                            "OFF"
-                        }
                         Text(
-                            text = "BET SETTINGS: ${if (incomingConfig.isAutoBetEnabled) "Auto" else "Manual"} · Stake ${String.format(Locale.US, "%.2f", incomingConfig.baseStake)} · Verify ${if (incomingConfig.verifyStakeReadBack) "ON" else "OFF"} · Game AutoCash $gameAutoLabel",
+                            text = "BET SETTINGS: ${if (incomingConfig.isAutoBetEnabled) "Auto" else "Manual"} · Stake ${String.format(Locale.US, "%.2f", incomingConfig.baseStake)} · Verify ${if (incomingConfig.verifyStakeReadBack) "ON" else "OFF"}",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "CASH OUT SETTINGS: ${if (incomingConfig.isAutoCashOutEnabled) "Auto" else "Manual"} · Target ${String.format(Locale.US, "%.2fx", incomingConfig.targetMultiplier)} · Min Flight ${incomingConfig.minFlightTimeBeforeCashOutMs}ms",
+                            text = "WIN TARGET MULTIPLIER: ${String.format(Locale.US, "%.2fx", incomingConfig.targetMultiplier)} (Cash Out handled by game)",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -369,7 +365,7 @@ fun SettingsAppearanceScreen(
                                     .height(48.dp)
                                     .testTag("settings_toggle_action_hand_btn")
                             ) {
-                                Text("ACTION HAND", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Text("BET HAND", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -416,7 +412,7 @@ fun SettingsAppearanceScreen(
                     testTag = "settings_automation_master_switch"
                 ) { applyConfigUpdate(localConfig.copy(automationMasterEnabled = it)) }
                 StrategyToggleRow(
-                    label = "Verify BET/CASH Button Readiness",
+                    label = "Verify BET Button Readiness",
                     checked = localConfig.verifyButtonStateBeforeAction,
                     testTag = "settings_verify_button_switch"
                 ) { applyConfigUpdate(localConfig.copy(verifyButtonStateBeforeAction = it)) }
@@ -741,6 +737,16 @@ fun SettingsAppearanceScreen(
                         },
                         modifier = Modifier.testTag("settings_reset_session_btn")
                     )
+                    if (onResetProgression != null) {
+                        AssistChip(
+                            onClick = onResetProgression,
+                            label = { Text("Reset Progression", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                            leadingIcon = {
+                                Icon(Icons.Default.RestartAlt, contentDescription = "Reset Progression", modifier = Modifier.size(16.dp))
+                            },
+                            modifier = Modifier.testTag("settings_reset_progression_btn")
+                        )
+                    }
                     if (onEndSessionAndClearData != null) {
                         AssistChip(
                             onClick = { showConfirmEndSessionDialog = true },

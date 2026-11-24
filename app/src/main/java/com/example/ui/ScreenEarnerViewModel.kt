@@ -47,6 +47,7 @@ import com.example.service.FloatingOverlayService
 import com.example.service.ScreenCaptureProjectionService
 import com.example.service.ScreenEarnerAccessibilityService
 import com.example.service.ScreenEarnerOverlayService
+import com.example.service.SessionStateManager
 import com.example.ui.navigation.AppRoute
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -569,10 +570,11 @@ class ScreenEarnerViewModel(application: Application) : AndroidViewModel(applica
         _userMessage.value = if (enabled) "Automatic Bet enabled" else "Manual Bet mode active (Tap Hand to Bet)"
     }
 
-    fun toggleAutoCashOut(enabled: Boolean) {
+    fun resetStrategyProgression() {
         val current = strategyConfig.value ?: StrategyConfig()
-        saveStrategyConfig(current.copy(isAutoCashOutEnabled = enabled))
-        _userMessage.value = if (enabled) "Automatic Cash Out enabled" else "Manual Cash Out mode active (Tap Hand to Cash Out)"
+        automationEngine.resetStrategyProgression(current)
+        SessionStateManager(getApplication()).clearStrategyProgression()
+        _userMessage.value = "Martingale / stake progression reset to base stake"
     }
 
     fun updateLossProgression(enabled: Boolean, mode: StakeProgressionMode, addAmount: Double) {

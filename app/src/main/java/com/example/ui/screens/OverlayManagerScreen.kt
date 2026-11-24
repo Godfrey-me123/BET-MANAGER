@@ -22,7 +22,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.Wallet
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -46,7 +45,6 @@ import com.example.data.model.FloatingShortcut
 import com.example.data.model.GameState
 import com.example.data.model.ShortcutType
 import com.example.ui.theme.ActionBetGreen
-import com.example.ui.theme.ActionCashOutAmber
 import com.example.ui.theme.PrimaryIndigo
 
 @Composable
@@ -66,13 +64,13 @@ fun OverlayManagerScreen(
     onExitUtility: () -> Unit,
     onOpenSettings: () -> Unit,
     onAddBetShortcut: () -> Unit,
-    onAddCashOutShortcut: () -> Unit,
     onUpdateShortcutPos: (id: Long, x: Float, y: Float) -> Unit,
     onSetCalibratedTarget: (x: Float, y: Float) -> Unit,
     onStartCalibration: (id: Long) -> Unit,
     onSaveShortcutSettings: (FloatingShortcut) -> Unit,
     onDeleteShortcut: (id: Long) -> Unit
 ) {
+    val betShortcuts = shortcuts.filter { it.type == ShortcutType.BET }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -120,7 +118,7 @@ fun OverlayManagerScreen(
             }
         }
 
-        // Action Buttons Row
+        // Action Buttons Row (BET-only floating hand)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -138,25 +136,11 @@ fun OverlayManagerScreen(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("ADD BET BUTTON", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
-
-            Button(
-                onClick = onAddCashOutShortcut,
-                colors = ButtonDefaults.buttonColors(containerColor = ActionCashOutAmber),
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp)
-                    .testTag("add_cashout_btn")
-            ) {
-                Icon(Icons.Default.Wallet, contentDescription = "Add Cash Out", modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("ADD CASH OUT", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            }
         }
 
         // Header for list
         Text(
-            text = "INDEPENDENT FLOATING TASK ROBOTS (${shortcuts.size})",
+            text = "INDEPENDENT FLOATING BET HAND (${betShortcuts.size})",
             fontWeight = FontWeight.Bold,
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.primary
@@ -166,7 +150,7 @@ fun OverlayManagerScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxWidth().weight(1f)
         ) {
-            items(shortcuts) { shortcut ->
+            items(betShortcuts) { shortcut ->
                 val isBet = shortcut.type == ShortcutType.BET
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -185,7 +169,7 @@ fun OverlayManagerScreen(
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Surface(
-                                    color = if (isBet) ActionBetGreen else ActionCashOutAmber,
+                                    color = ActionBetGreen,
                                     shape = RoundedCornerShape(8.dp)
                                 ) {
                                     Text(

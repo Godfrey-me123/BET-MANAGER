@@ -240,6 +240,9 @@ object AutomationController {
                 )
             }
         }
+        targetEngine.onProgressionStateChanged = { snapshot ->
+            sessionStateManager?.saveStrategyProgression(snapshot)
+        }
     }
 
     fun initialize(repo: ScreenEarnerRepository, context: Context? = null) {
@@ -263,6 +266,9 @@ object AutomationController {
                 controllerScope
             )
             attachEngineCallbacks(newEngine)
+            sessionStateManager?.loadStrategyProgression()?.let { savedProg ->
+                newEngine.strategyEngine.restoreProgressionSnapshot(savedProg, _latestConfig.value)
+            }
             engine = newEngine
             startBackgroundLoops(repo)
             if (sessionStateManager?.isIntendedMonitoringActive() == true) {
@@ -554,6 +560,7 @@ object AutomationController {
             _sessionCrashesRecorded.value = 0
             _activeSessionCrashRecords.value = emptyList()
             currentEngine?.quitAutomation()
+            currentEngine?.resetStrategyProgression(_latestConfig.value)
             currentEngine?.resetSessionStats()
             currentEngine?.gameDetection?.resetLiveSessionTelemetry(sessionId = "")
             currentEngine?.gameDetection?.updatePipelineStatus(
@@ -623,7 +630,7 @@ object AutomationController {
                     limits = _latestLimits.value,
                     currentTimeMs = nowMs,
                     siteButtonState = detection.uiTargets.siteButtonState,
-                    observationOnly = !autoRunning || (!cfg.isAutoBetEnabled && !cfg.isAutoCashOutEnabled)
+                    observationOnly = !autoRunning || !cfg.isAutoBetEnabled
                 )
             }
         }
@@ -723,6 +730,9 @@ object AutomationController {
                 baselineGameIdCache = baselineGame.orEmpty()
             }
 
+            mgr.loadStrategyProgression()?.let { savedProg ->
+                currentEngine.strategyEngine.restoreProgressionSnapshot(savedProg, _latestConfig.value)
+            }
             if (mgr.isIntendedMonitoringActive()) {
                 currentEngine.restoreMonitoringRunningPreservingSession(
                     config = _latestConfig.value,
@@ -1432,7 +1442,7 @@ object AutomationController {
                         limits = _latestLimits.value,
                         currentTimeMs = nowMs,
                         siteButtonState = targets.siteButtonState,
-                        observationOnly = !autoRunning || (!cfg.isAutoBetEnabled && !cfg.isAutoCashOutEnabled)
+                        observationOnly = !autoRunning || !cfg.isAutoBetEnabled
                     )
                     CurrencyManager.updateFromConfigAndGameState(cfg, currentEngine.gameDetection.gameState.value)
                     currentEngine.updateLiveDiagnostics(targets, currentEngine.gameDetection.gameState.value, cfg)
@@ -1624,7 +1634,7 @@ object AutomationController {
                     limits = _latestLimits.value,
                     currentTimeMs = nowMs,
                     siteButtonState = targets.siteButtonState,
-                    observationOnly = !autoRunning || (!cfg.isAutoBetEnabled && !cfg.isAutoCashOutEnabled)
+                    observationOnly = !autoRunning || !cfg.isAutoBetEnabled
                 )
 
                 CurrencyManager.updateFromConfigAndGameState(cfg, currentEngine.gameDetection.gameState.value)

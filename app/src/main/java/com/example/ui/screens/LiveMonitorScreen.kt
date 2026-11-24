@@ -90,7 +90,6 @@ fun LiveMonitorScreen(
     onPauseAutomationAssistant: (() -> Unit)? = null,
     onStopAutomationAssistant: (() -> Unit)? = null,
     onToggleBetHand: (() -> Unit)? = null,
-    onToggleCashOutHand: (() -> Unit)? = null,
     onToggleActionHand: (() -> Unit)? = null,
     onOpenHandSettings: (() -> Unit)? = null
 ) {
@@ -358,7 +357,7 @@ fun LiveMonitorScreen(
                                 ) {
                                     Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(15.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("ACTION HAND", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("BET HAND", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                 }
                             }
                             if (onOpenHandSettings != null) {

@@ -116,11 +116,8 @@ fun HomeScreen(
     onSnoozeAlarm: () -> Unit = {},
     onEndSessionAndClearData: () -> Unit = {},
     onToggleAutoBet: (Boolean) -> Unit = {},
-    onToggleAutoCashOut: (Boolean) -> Unit = {},
     betShortcut: FloatingShortcut? = null,
-    cashOutShortcut: FloatingShortcut? = null,
     onToggleBetHand: () -> Unit = {},
-    onToggleCashOutHand: () -> Unit = {},
     onToggleActionHand: (() -> Unit)? = null,
     onOpenHandSettings: (() -> Unit)? = null,
     queuedOpportunitiesCount: Int = 0,
@@ -379,9 +376,7 @@ fun HomeScreen(
 
         ExecutionHandsControlCard(
             isAutoBetEnabled = config.isAutoBetEnabled,
-            isAutoCashOutEnabled = config.isAutoCashOutEnabled,
             onToggleAutoBet = onToggleAutoBet,
-            onToggleAutoCashOut = onToggleAutoCashOut,
             onToggleActionHand = onToggleActionHand ?: onToggleBetHand,
             onOpenHandSettings = onOpenHandSettings
         )
@@ -435,7 +430,7 @@ fun HomeScreen(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = if (config.isAutoBetEnabled)
-                                "Consumes confirmed strategy triggers for stake entry & Cash Out without interrupting monitoring."
+                                "Consumes confirmed strategy triggers for stake entry & verified BET placement without interrupting monitoring."
                             else
                                 "App monitors multipliers, crash history, and alarms normally without editing fields or placing bets.",
                             fontSize = 11.sp,
@@ -862,9 +857,7 @@ private fun ModuleTileButton(
 @Composable
 fun ExecutionHandsControlCard(
     isAutoBetEnabled: Boolean,
-    isAutoCashOutEnabled: Boolean = false,
     onToggleAutoBet: (Boolean) -> Unit,
-    onToggleAutoCashOut: (Boolean) -> Unit = {},
     onToggleActionHand: () -> Unit,
     onOpenHandSettings: (() -> Unit)? = null
 ) {
@@ -884,13 +877,13 @@ fun ExecutionHandsControlCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Unified Action Hand",
+                        text = "Floating BET Action Hand",
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Adapts automatically between BET & CASH OUT by verified state. Double-tap or long-press hand for Settings.",
+                        text = "Places verified BET on live target and locks until current round settles. Double-tap or long-press hand for Settings.",
                         fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -917,24 +910,6 @@ fun ExecutionHandsControlCard(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = if (isAutoCashOutEnabled) "Cash Out Mode: AUTOMATIC" else "Cash Out Mode: MANUAL TAP",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Switch(
-                    checked = isAutoCashOutEnabled,
-                    onCheckedChange = onToggleAutoCashOut,
-                    modifier = Modifier.testTag("home_auto_cashout_switch")
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(
@@ -943,7 +918,7 @@ fun ExecutionHandsControlCard(
                     modifier = Modifier.weight(1f).testTag("toggle_action_hand_btn")
                 ) {
                     Text(
-                        text = "ACTION HAND",
+                        text = "BET HAND",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1
